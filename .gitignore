@@ -1,0 +1,32 @@
+# 依赖与构建产物
+node_modules/
+.next/
+out/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# 环境变量与秘密信息（.env 不得提交）
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+backend/data/
+
+# 日志与临时文件
+logs/
+*.log
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

@@ -1,0 +1,32 @@
+# 小码 Xiaoma 部署编排（阶段 1 初始版本）
+# 用法：cp .env.example .env && docker compose up -d
+services:
+  backend:
+    build: ./backend
+    container_name: xiaoma-backend
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      # SQLite 数据文件持久化：容器重启后学习数据不丢失
+      - xiaoma-data:/app/data
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: xiaoma-frontend
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - PORT=3000
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  xiaoma-data:
