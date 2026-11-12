@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from app.models.learning_plan import LearningPlanItem, LearningPlanVersion
 from app.seed.course_seed import seed_courses
+from app.services.mastery_service import MasteryService
 
 GOAL = "三个月内掌握 Python 基础语法"
 
@@ -19,6 +20,21 @@ def _seed(factory) -> None:
     db = factory()
     try:
         seed_courses(db)
+    finally:
+        db.close()
+
+
+def _grant_mastery(factory, codes: list[str]) -> None:
+    """写入掌握证据（模拟知识点测验/诊断测验已通过）。
+
+    阶段 5 起 ``mastered_kp_codes`` 只作为自述线索记录，不再直接跳过；
+    要让某个知识点真正不排期，必须有掌握证据。
+    """
+    db = factory()
+    try:
+        service = MasteryService(db)
+        for code in codes:
+            service.grant_mastery(code, source="placement", quiz_difficulty="beginner")
     finally:
         db.close()
 
@@ -71,6 +87,7 @@ def _mark_items_completed(factory, plan_id: str, version_number: int, count: int
 def test_create_plan_generates_draft_schedule(api_env):
     client, factory = api_env
     _seed(factory)
+    _grant_mastery(factory, ["python-basics-01-02"])
 
     data = _create_plan(client)
     assert data["status"] == "draft"
@@ -150,6 +167,7 @@ def test_create_second_plan_conflicts(api_env):
 def test_adjust_creates_new_version_and_keeps_history(api_env):
     client, factory = api_env
     _seed(factory)
+    _grant_mastery(factory, ["python-basics-01-02"])
     plan_id = _create_plan(client)["id"]
     client.post(f"/api/v1/plans/{plan_id}/confirm")
 
@@ -190,6 +208,7 @@ def test_adjust_creates_new_version_and_keeps_history(api_env):
 def test_adjust_keeps_completed_items(api_env):
     client, factory = api_env
     _seed(factory)
+    _grant_mastery(factory, ["python-basics-01-02"])
     plan_id = _create_plan(client)["id"]
     client.post(f"/api/v1/plans/{plan_id}/confirm")
 

@@ -260,7 +260,9 @@ def test_wrong_answers_are_saved_and_mastery_is_rejected(api_env):
     update = result["mastery_updates"][0]
     assert update["achieved"] is False
     assert any("未通过" in reason for reason in update["reasons"])
-    assert _profile_status(factory, "python-basics-01-01") == "pending_verification"
+    # 阶段 5：正式测验未通过 → 掌握度进入 NEEDS_REVIEW，旧状态投影为 review_due
+    assert update["status"] == "needs_review"
+    assert _profile_status(factory, "python-basics-01-01") == "review_due"
 
     resp = client.get("/api/v1/mistakes")
     assert resp.status_code == 200, resp.text

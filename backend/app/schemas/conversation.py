@@ -54,17 +54,49 @@ class ConversationKnowledgePointOut(BaseModel):
 class MessageOut(BaseModel):
     """一条历史消息。
 
-    status=error 表示该 AI 回复生成失败/被中断：content 为已生成的部分内容，
-    error_message 为失败原因；前端必须将其显示为失败消息而非正常回复。
+    status=error / stopped 表示该 AI 回复生成失败或被用户停止：content 为
+    已生成的部分内容，前端必须显示为失败/已停止，不能当作完整回复。
+    V1.4 三个字段用于卡片刷新恢复：message_type、structured_data、
+    card_version；普通文本消息 structured_data / card_version 为 None。
     """
 
     id: UUID
     role: str  # user | assistant
     content: str
-    status: str  # completed | error
+    status: str  # completed | error | streaming | stopped
     error_message: str | None = None
     model_name: str | None = None
     created_at: datetime
+    message_type: str = "text"
+    structured_data: dict | None = None
+    card_version: str | None = None
+
+
+class ConversationTitleUpdate(BaseModel):
+    """会话重命名（PATCH 局部更新，只接受 title）。"""
+
+    title: str = Field(min_length=1, max_length=200)
+
+    @field_validator("title")
+    @classmethod
+    def _strip_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("会话标题不能为空")
+        return value
+
+
+class RegenerateRequest(BaseModel):
+    """重新生成：指定一条普通文本助手回复，复用其前置用户消息。"""
+
+    message_id: UUID
+
+
+class StopGenerationOut(BaseModel):
+    """停止生成请求的结果。stopped=False 表示该会话当前没有进行中的生成。"""
+
+    conversation_id: UUID
+    stopped: bool
 
 
 class ConversationOut(BaseModel):

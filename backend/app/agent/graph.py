@@ -20,6 +20,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy.orm import Session
 
+from app.agent.cards import cards_for_state
 from app.agent.context import AgentContextService
 from app.agent.contracts import AgentRunError, IntentResult, LearningContext, ToolResult
 from app.agent.intent import recognize_intent
@@ -47,6 +48,7 @@ class AgentState(TypedDict, total=False):
     reply: str
     streamed: bool
     result_status: str
+    reply_scope: str
 
 
 def build_agent_graph(*, db: Session):
@@ -99,10 +101,12 @@ def build_agent_graph(*, db: Session):
             )
         # 必须在此处取父图 writer，再显式传给嵌套子图转发增量。
         writer = get_stream_writer()
+        toolbox = AgentToolbox(db, state["context"])
         teaching_subgraph = build_teaching_subgraph(
             chat_context.llm_request,
             chat_context.system_prompt,
             emit=writer,
+            toolbox=toolbox,
         )
         result = await teaching_subgraph.ainvoke(
             {
@@ -113,18 +117,36 @@ def build_agent_graph(*, db: Session):
             }
         )
         return {
-            "tool_results": {},
+            "tool_results": result.get("tool_results", {}),
             "reply": result.get("reply", ""),
             "streamed": bool(result.get("streamed", False)),
             "result_status": result.get("result_status", "ok"),
+            "reply_scope": result.get("reply_scope", ""),
         }
 
     async def finalize_node(state: AgentState) -> dict[str, Any]:
         reply = (state.get("reply") or "").strip()
         if not reply:
             raise AgentRunError("没有生成有效回复，请稍后重试。")
+        writer = get_stream_writer()
         if not state.get("streamed"):
-            get_stream_writer()({"delta": state["reply"]})
+            writer({"delta": state["reply"]})
+
+        # V1.4 批次 5：Agent 真正产出业务卡片。
+        # 卡片在父图节点发射，而不是在 planning / quiz / review 子图内部发射：
+        # 嵌套子图的 custom 事件不会自动冒泡到父图流（teaching 子图已用显式
+        # emit 参数处理过同一问题）。这里能同时读到各子图回传的 tool_results，
+        # 由纯函数层把真实 Service 结果转成完整 v1 卡片，一次性下发。
+        # 批次 8：reply_scope=out_of_scope 表示本轮是「先说明范围再回答」，
+        # 不是讲解正文，因此不下发 lesson_card。
+        for card in cards_for_state(
+            intent=state["intent"],
+            tool_results=state.get("tool_results", {}),
+            context=state.get("context"),
+            reply=state["reply"],
+            reply_scope=state.get("reply_scope", ""),
+        ):
+            writer({"card": card})
         return {}
 
     graph = StateGraph(AgentState)

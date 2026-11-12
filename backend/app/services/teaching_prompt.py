@@ -63,7 +63,7 @@ TASK_STATUS_LABELS: dict[str, str] = {
 
 _ROLE = (
     "你是「小码」，一位耐心、严谨的 AI 编程学习教练，正在辅导一名编程初学者"
-    "学习 Python 通用基础课程。你的任务是围绕当前知识点进行概念解释、分步骤讲解、"
+    "学习 Python 编程课程。你的任务是围绕当前知识点进行概念解释、分步骤讲解、"
     "举例、代码解释和错误分析，并根据学习者的基础调整讲解难度。"
 )
 
@@ -75,15 +75,90 @@ _TEACHING_RULES = """【教学方式】
 4. 难度适配：严格按照上方学习者档案调整深度和节奏；如果用户表示听不懂，换一种更简单的说法并给更小的例子。
 5. 代码解释：按行或按段说明代码的作用、执行顺序和关键概念；只在必要时补充背景知识。
 6. 错误分析：如果用户提供报错或代码，先定位错误所在行/位置，解释错误类型和根本原因，再给出修改建议和修正后的代码，并说明修改原因；信息不足时先询问缺少的代码或报错信息。
-7. 回答要结构清晰、中文表达（用户明确使用其他语言时再跟随），避免一次输出过长；用户没有要求时不要堆砌无关扩展知识。"""
+7. 回答要结构清晰、中文表达（用户明确使用其他语言时再跟随），避免一次输出过长；用户没有要求时不要堆砌无关扩展知识。
+8. 范围标记：如果用户的问题与【当前知识点】无关、需要先说明「不在本次知识点范围内」再引导，请在回复正文最前面单独输出一行 [[out_of_scope]]，然后另起一行写正文；问题属于当前知识点时不要输出该标记，也不要在正文里解释或提到它。"""
 
 _BOUNDARIES = """【边界与真实性】
 - 当前版本不执行用户提交的任何代码，也不能访问用户本地环境；不得声称「我运行了代码」或编造运行结果。
 - 不得仅凭聊天判断知识点已掌握，也不得声称用户已掌握；掌握必须通过系统测验验证。用户询问掌握情况时，说明需要完成测验。
 - 课程结构与知识点由系统维护，不得创造新的正式课程、章节或知识点。
+- 【阶段 6 硬约束】不得自己创建/发布正式课程，不得修改课程依赖关系，不得自动跳过先修条件（未掌握的先修只能提示补学）。
+- 【阶段 6 硬约束】不得随意更新用户掌握状态；掌握状态只由测验、练习、诊断验证的证据写入，你只能如实转述系统查询结果。
+- 【阶段 6 硬约束】未经用户明确确认，不得保存或声称已保存任何学习计划修改；你最多只能展示待确认方案，并引导用户确认。
 - 不编造不确定的事实；如果不确定，明确说明并建议用户查证。
 - 不输出、猜测或索取任何 API Key、密码等敏感信息。
 - 如果用户的问题超出 Python 基础学习范围，可以先简要回答，再把话题引导回当前知识点。"""
+
+# 课时内容的中文展示名；Service 返回的 CourseContentOut 字段按此顺序渲染。
+CONTENT_FIELD_LABELS: dict[str, str] = {
+    "learning_objectives": "学习目标",
+    "why_learn": "为什么学",
+    "concept_explanation": "核心概念",
+    "plain_explanation": "通俗解释",
+    "syntax_explanation": "语法 / API 讲解",
+    "example_code": "示例代码",
+    "code_explanation": "逐行解释",
+    "example_output": "示例输出",
+    "common_mistakes": "常见错误",
+    "error_analysis": "错误分析",
+    "beginner_exercises": "入门练习",
+    "advanced_exercises": "进阶练习",
+    "quiz_note": "本节测验",
+    "summary": "学习总结",
+    "next_lesson": "下一课建议",
+}
+
+
+def build_course_material_section(
+    knowledge_point: object | None, lesson: object | None
+) -> str:
+    """把 Service 读取的真实课程内容渲染成提示词段落（阶段 6）。
+
+    Agent 讲解前必须先经 CourseService 取知识点与课时内容；这里只做
+    结构化转写，不生成、不补充课程库里不存在的内容。
+    """
+    if knowledge_point is None and lesson is None:
+        return (
+            "【课程库内容】\n本次对话未关联具体知识点或课时；"
+            "不要虚构课程内容，可请用户先选择今日任务或知识点。"
+        )
+
+    lines = ["【课程库内容】（以下全部来自课程库 Service，是本次讲解的事实依据）"]
+    if knowledge_point is not None:
+        kp = knowledge_point
+        lines.append(f"- 知识点：{kp.name}（{kp.code}）")
+        lines.append(f"- 学习目标：{getattr(kp, 'learning_goal', '') or '未登记'}")
+        lines.append(f"- 掌握标准：{getattr(kp, 'mastery_criteria', '') or '未登记'}")
+        chapter = getattr(kp, "chapter", None)
+        if chapter is not None:
+            lines.append(f"- 所属章节：{chapter.title}（{chapter.code}）")
+        kp_lesson = getattr(kp, "lesson", None)
+        if kp_lesson is not None:
+            lines.append(f"- 所属课时：{kp_lesson.title}（{kp_lesson.code}）")
+
+    if lesson is not None:
+        lines.append(f"- 课时标题：{lesson.title}（{lesson.code}）")
+        module = getattr(lesson, "module", None)
+        course = getattr(lesson, "course", None)
+        if module is not None:
+            lines.append(f"- 章节：{module.title}（{module.code}）")
+        if course is not None:
+            lines.append(f"- 课程：{course.name}（{course.code}）")
+        content = getattr(lesson, "content", None)
+        if content is None:
+            lines.append("- 该课时尚未录入正式教材内容；不要编造教材原文。")
+        else:
+            payload = content.model_dump() if hasattr(content, "model_dump") else {}
+            for key, label in CONTENT_FIELD_LABELS.items():
+                value = payload.get(key)
+                if value is None or value == "":
+                    continue
+                lines.append(f"- 【{label}】{str(value)[:1200]}")
+    lines.append(
+        "讲解、举例、代码解释、错误分析与学习总结都必须以上述内容为准；"
+        "不得声称课程库里有未列出的内容，也不得替系统创建或修改课程。"
+    )
+    return "\n".join(lines)
 
 
 def build_teaching_prompt(
@@ -91,6 +166,8 @@ def build_teaching_prompt(
     knowledge_point: KnowledgePoint | None,
     daily_task: DailyTask | None,
     learning_status: str,
+    *,
+    course_material: str | None = None,
 ) -> str:
     """构建一次教学对话的系统提示词（上下文均来自数据库真实记录）。"""
     sections = [
@@ -98,9 +175,10 @@ def build_teaching_prompt(
         _profile_section(user.profile),
         _knowledge_point_section(knowledge_point, learning_status),
         _task_section(daily_task),
-        _TEACHING_RULES,
-        _BOUNDARIES,
     ]
+    if course_material:
+        sections.append(course_material)
+    sections.extend([_TEACHING_RULES, _BOUNDARIES])
     return "\n\n".join(sections)
 
 
@@ -133,7 +211,7 @@ def _knowledge_point_section(
         return (
             "【当前知识点】\n"
             "本次对话未关联具体知识点。请围绕用户的问题进行 Python 基础教学；"
-            "如问题与课程内容相关，可结合 Python 通用基础课程范围回答；"
+            "如问题与课程内容相关，可结合当前课程范围回答；"
             "不要虚构课程结构或章节。"
         )
 

@@ -88,10 +88,16 @@ class LearningPlanVersion(UUIDPkMixin, TimestampMixin, Base):
     computed_duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
     # 初始诊断快照：当前编程基础（L0/L1/L2）
     current_level: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # 初始诊断快照：用户自述已掌握的知识点稳定 code 列表。
-    # 仅作为排期范围依据（不再安排），不写入 learning_profiles 掌握状态——
-    # PRD 约定：未经测验验证不得标记为已掌握。
+    # 阶段 5 起：有掌握证据、实际不排期的知识点稳定 code 列表。
+    # 证据来自知识点测验或诊断测验（status=mastered），自述不算。
+    # 历史版本里该列可能装着「诊断自述」的 code，读取时以掌握度表为准重新计算。
     mastered_kp_codes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 用户自述完成但未验证的知识点（阶段 5）：保留当时的说法，但不用于跳过。
+    self_reported_kp_codes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 阶段 6：生成/调整计划时实际使用的八类输入快照（学习目标、每日时间、
+    # 能力等级、已掌握/未掌握、课程前置、课程预计时间、测验表现、诊断证据）。
+    # 只作审计与展示，不参与排期算法；排期仍以确定性的掌握证据为准。
+    plan_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     plan: Mapped[LearningPlan] = relationship(back_populates="versions")
     items: Mapped[list[LearningPlanItem]] = relationship(

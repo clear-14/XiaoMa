@@ -23,7 +23,7 @@ def test_list_courses(api_env):
     assert len(courses) == 1
     course = courses[0]
     assert course["code"] == "python-basics"
-    assert course["name"] == "Python 通用基础"
+    assert course["name"] == "Python 零基础入门"
     assert course["chapter_count"] == 6
     assert course["description"]
 

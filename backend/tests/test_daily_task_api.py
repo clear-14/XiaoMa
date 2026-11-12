@@ -159,7 +159,7 @@ def test_today_generates_first_day_tasks(api_env):
     assert data["generated"] is True
     assert data["task_date"] == utc_today_naive().isoformat()
 
-    # 任务 = 当前生效版本第 1 天全部 pending 项目（已掌握知识点除外）
+    # 任务 = 当前生效版本第 1 天全部 pending 项目
     items = _version_items(factory, plan_id, 1)
     min_day = min(item.day_index for item in items if item.status == "pending")
     expected_codes = sorted(
@@ -170,8 +170,9 @@ def test_today_generates_first_day_tasks(api_env):
     assert [task["knowledge_point"]["code"] for task in data["tasks"]] == expected_codes
     assert all(task["status"] == "pending" for task in data["tasks"])
     assert all(task["day_index"] == min_day for task in data["tasks"])
-    # 诊断已掌握的知识点不安排
-    assert "python-basics-01-02" not in expected_codes
+    # 阶段 5：自述完成不等于掌握，自述的知识点仍会被安排；
+    # 「已掌握不安排」由 test_today_skips_mastered_knowledge_points 覆盖。
+    assert "python-basics-01-02" in expected_codes
     assert data["note"] is None
 
 

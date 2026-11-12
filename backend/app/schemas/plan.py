@@ -55,7 +55,11 @@ class PlanItemOut(BaseModel):
 
 
 class PlanVersionOut(BaseModel):
-    """计划版本详情（含全部计划项目）。"""
+    """计划版本详情（含全部计划项目）。
+
+    阶段 5 起 ``mastered_kp_codes`` 的含义收紧为「有掌握证据、实际被跳过」；
+    用户自述的另见 ``self_reported_kp_codes`` 与 ``pending_verification_kp_codes``。
+    """
 
     version_number: int
     status: str
@@ -67,6 +71,15 @@ class PlanVersionOut(BaseModel):
     warning: str | None
     current_level: str | None
     mastered_kp_codes: list[str] | None
+    # 实际跳过的知识点（= 有掌握证据的 mastered_kp_codes，显式给一份便于前端直读）
+    skipped_kp_codes: list[str] = Field(default_factory=list)
+    # 用户自述完成的知识点（未验证，不参与跳过）
+    self_reported_kp_codes: list[str] | None = None
+    # 自述但还没证据的知识点：仍需学习或先做诊断测验
+    pending_verification_kp_codes: list[str] = Field(default_factory=list)
+    skip_note: str | None = None
+    # 阶段 6：生成该版本时使用的八类输入快照（只读审计信息）
+    plan_context: dict = Field(default_factory=dict)
     created_at: datetime
     items: list[PlanItemOut]
 

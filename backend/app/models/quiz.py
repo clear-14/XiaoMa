@@ -55,6 +55,20 @@ SUBJECTIVE_QUESTION_TYPES: tuple[str, ...] = (
     "code_analysis",
     "code_writing",
 )
+# 教材题目分类（阶段 3）：一节课的测验要同时覆盖这三类。
+QUESTION_CATEGORIES: tuple[str, ...] = ("基础理解", "代码阅读", "应用练习")
+
+# 题型 → 分类的默认映射；历史内置题按此回填，教材题在种子里显式给出。
+CATEGORY_BY_QUESTION_TYPE: dict[str, str] = {
+    "single_choice": "基础理解",
+    "multiple_choice": "基础理解",
+    "true_false": "基础理解",
+    "fill_blank": "基础理解",
+    "code_analysis": "代码阅读",
+    "code_writing": "应用练习",
+    "short_answer": "应用练习",
+}
+
 QUESTION_SOURCES: tuple[str, ...] = ("builtin", "ai")
 QUESTION_STATUSES: tuple[str, ...] = ("approved", "rejected")
 QUESTION_VALIDATION_STATUSES: tuple[str, ...] = (
@@ -71,6 +85,11 @@ QUIZ_SCOPE_TYPES: tuple[str, ...] = (
     "review",
 )
 QUIZ_ATTEMPT_STATUSES: tuple[str, ...] = ("in_progress", "submitted")
+
+# 测验目的（阶段 5）：practice 常规练习/验证；placement 诊断（跳级）测验。
+# 用独立列而不是往 scope_type 的 CHECK 里加值：SQLite 改 CHECK 需要重建表，
+# 而 quiz_attempts 被 mistakes / review_tasks 外键引用，重建风险高于收益。
+QUIZ_PURPOSES: tuple[str, ...] = ("practice", "placement")
 
 # 错题复习状态与间隔（PRD 6.5 建议间隔 1、3、7、14 天）。
 REVIEW_STATUSES: tuple[str, ...] = ("pending", "resolved")
@@ -128,6 +147,9 @@ class Question(UUIDPkMixin, TimestampMixin, Base):
     correct_answer: Mapped[dict] = mapped_column(JSON, nullable=False)
     explanation: Mapped[str] = mapped_column(Text, nullable=False)
     difficulty: Mapped[str] = mapped_column(String(16), nullable=False)
+    # 教材题目分类（阶段 3）：基础理解 / 代码阅读 / 应用练习。
+    # 历史内置题按题型映射回填，因此列可空以兼容升级前的数据。
+    category: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     source: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="approved")
@@ -157,6 +179,9 @@ class QuizAttempt(UUIDPkMixin, TimestampMixin, Base):
         CheckConstraint(
             "status IN ('in_progress', 'submitted')", name="status"
         ),
+        CheckConstraint(
+            "purpose IN ('practice', 'placement')", name="purpose"
+        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -169,6 +194,11 @@ class QuizAttempt(UUIDPkMixin, TimestampMixin, Base):
     scope_name: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="in_progress"
+    )
+    # 测验目的：practice 常规 / placement 诊断（跳级）验证。
+    # 默认 practice 以兼容阶段 9 的全部历史记录。
+    purpose: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="practice", server_default="practice"
     )
     question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_points: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

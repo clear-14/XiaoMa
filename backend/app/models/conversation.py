@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -22,6 +23,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text as sa_text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -32,7 +34,14 @@ from app.models.daily_task import DailyTask
 from app.models.user import User
 
 MESSAGE_ROLES: tuple[str, ...] = ("user", "assistant")
-MESSAGE_STATUSES: tuple[str, ...] = ("completed", "error")
+# V1.4：streaming 为助手开始生成时预建的消息；stopped 为用户主动停止，
+# 两者都保留部分文本，且都不进入模型上下文。
+MESSAGE_STATUSES: tuple[str, ...] = (
+    "completed",
+    "error",
+    "streaming",
+    "stopped",
+)
 
 
 class Conversation(UUIDPkMixin, TimestampMixin, SoftDeleteMixin, Base):
@@ -78,7 +87,9 @@ class Message(UUIDPkMixin, TimestampMixin, Base):
     __tablename__ = "messages"
     __table_args__ = (
         CheckConstraint("role IN ('user', 'assistant')", name="role"),
-        CheckConstraint("status IN ('completed', 'error')", name="status"),
+        CheckConstraint(
+            "status IN ('completed', 'error', 'streaming', 'stopped')", name="status"
+        ),
     )
 
     conversation_id: Mapped[uuid.UUID] = mapped_column(
@@ -90,6 +101,16 @@ class Message(UUIDPkMixin, TimestampMixin, Base):
     error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # 生成该回复所用模型（便于追溯；不记录密钥）
     model_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # V1.4 结构化卡片：一条助手消息可携带多张卡片，但不新增消息行。
+    # structured_data 是完整 JSON 对象，见 app/schemas/cards.py。
+    message_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="text",
+        server_default=sa_text("'text'"),
+    )
+    structured_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    card_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
 

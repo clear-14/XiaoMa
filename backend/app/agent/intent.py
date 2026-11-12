@@ -75,7 +75,19 @@ _TODAY_PATTERN = re.compile(
 _WHAT_TO_LEARN_PATTERN = re.compile(
     r"(?:我|接下来|下一步)(?:今天|现在|接下来|下一步)?(?:应该|该)?学(?:什么|啥)"
 )
-_QUIZ_HISTORY_WORDS: tuple[str, ...] = ("记录", "历史", "成绩", "结果")
+_QUIZ_HISTORY_WORDS: tuple[str, ...] = ("记录", "历史")
+# 批次 8：问「成绩 / 得分」是要看最近一次已提交测验的结果，不是列表统计。
+_QUIZ_RESULT_WORDS: tuple[str, ...] = (
+    "成绩",
+    "得分",
+    "分数",
+    "测验结果",
+    "考了多少",
+    "得了多少分",
+    "对了几道",
+    "错了几道",
+    "上次测验",
+)
 _PLAN_WORDS: tuple[str, ...] = ("学习计划", "计划", "安排")
 
 
@@ -111,8 +123,21 @@ def recognize_intent(message: str) -> IntentResult:
             reason="用户询问错题或复习安排",
         )
 
-    # 3. 测验：生成新测验或查看测验记录
+    # 3. 测验：查看最近一次结果 / 生成新测验 / 查看测验记录
     quiz_matches = [word for word in _QUIZ_WORDS if word in text]
+    result_matches = [word for word in _QUIZ_RESULT_WORDS if word in text]
+    # 「成绩 / 得分 / 对了几道」本身已指向一次测验的结果，不必再出现「测验」二字；
+    # 但「分数」在数学语境里另有含义（如小数、分数类型），必须与测验词同时出现，
+    # 避免把「讲讲分数和小数的区别」这类教学问题路由到测验子图。
+    result_is_quizish = any(word != "分数" for word in result_matches)
+    if result_matches and (quiz_matches or result_is_quizish):
+        return IntentResult(
+            intent="quiz",
+            sub_intent="quiz_result",
+            confidence=0.88,
+            matched_keywords=_unique([*quiz_matches, *result_matches]),
+            reason="用户查看最近一次测验的得分与答题结果",
+        )
     if quiz_matches:
         is_history = any(word in text for word in _QUIZ_HISTORY_WORDS)
         return IntentResult(

@@ -25,6 +25,8 @@ from app.agent.contracts import AgentRunError, IntentResult
 from app.agent.graph import build_agent_graph
 from app.agent.intent import recognize_intent
 from app.core.config import get_settings
+from app.models.conversation import Message
+from app.schemas.cards import normalize_card
 from app.services.conversation_service import (
     ChatContext,
     ConversationService,
@@ -45,12 +47,38 @@ class AgentService:
         仍可正常使用。
         """
         intent = recognize_intent(content)
-        context = ConversationService(self.db).prepare_chat(
+        service = ConversationService(self.db)
+        context = service.prepare_chat(
             conversation_id,
             content,
             require_llm=intent.intent == "teaching",
         )
-        return AgentRun(db=self.db, chat_context=context, intent=intent)
+        run = AgentRun(db=self.db, chat_context=context, intent=intent)
+        run.assistant_message = service.begin_assistant_message(context)
+        return run
+
+    def start_regenerate(
+        self, conversation_id: uuid.UUID, message_id: uuid.UUID
+    ) -> "AgentRun":
+        """V1.4：重新生成一条普通文本回复，复用原始用户消息。
+
+        不新增用户消息行、不重复增加 message_count；上下文截止到该用户消息，
+        旧回复不进入模型上下文。
+        """
+        service = ConversationService(self.db)
+        content, source = service.get_regeneration_source(
+            conversation_id, message_id
+        )
+        intent = recognize_intent(content)
+        context = service.prepare_chat(
+            conversation_id,
+            content,
+            require_llm=intent.intent == "teaching",
+            existing_user_message=source,
+        )
+        run = AgentRun(db=self.db, chat_context=context, intent=intent)
+        run.assistant_message = service.begin_assistant_message(context)
+        return run
 
 
 @dataclass
@@ -59,10 +87,17 @@ class AgentRun:
     chat_context: ChatContext
     intent: IntentResult
     _parts: list[str] = field(default_factory=list, init=False)
+    _cards: list[dict[str, Any]] = field(default_factory=list, init=False)
+    # 生成开始时预建的 streaming 消息；卡片事件与终态都落在同一行
+    assistant_message: Message | None = None
 
     @property
     def reply(self) -> str:
         return "".join(self._parts)
+
+    @property
+    def cards(self) -> list[dict[str, Any]]:
+        return self._cards
 
     @property
     def message_model_name(self) -> str | None:
@@ -105,6 +140,11 @@ class AgentRun:
                             text = str(chunk["delta"])
                             self._parts.append(text)
                             yield {"event": "delta", "delta": text}
+                        elif isinstance(chunk, dict) and "card" in chunk:
+                            # V1.4：卡片一次性完整下发；不合法帧降级 error_card
+                            card = normalize_card(chunk["card"])
+                            self._cards.append(card)
+                            yield {"event": "card", "card": card}
                     elif mode == "values":
                         final_state = chunk
         except TimeoutError:
@@ -146,7 +186,8 @@ class AgentRun:
             self._parts.append(text)
             yield {"event": "delta", "delta": text}
 
-        if not self.reply.strip():
+        # 纯卡片回复也是有效回复（例如只下发一张今日任务卡片）
+        if not self.reply.strip() and not self._cards:
             logger.warning(
                 "agent run empty conversation_id=%s intent=%s",
                 conversation_id,
@@ -176,11 +217,13 @@ class AgentRun:
     # ------------------------------------------------------------- 持久化
 
     def complete(self):
-        """保存完整成功回复。"""
+        """保存完整成功回复（含本轮收到的全部卡片）。"""
         return ConversationService(self.db).complete_assistant_message(
             self.chat_context,
             self.reply,
             model_name=self.message_model_name,
+            assistant_message=self.assistant_message,
+            cards=self._cards,
         )
 
     def fail(self, error_message: str):
@@ -190,4 +233,14 @@ class AgentRun:
             self.reply,
             error_message,
             model_name=self.message_model_name,
+            assistant_message=self.assistant_message,
+        )
+
+    def stop(self):
+        """V1.4：保存用户主动停止的回复，状态 stopped，不伪装成功。"""
+        return ConversationService(self.db).stop_assistant_message(
+            self.chat_context,
+            self.reply,
+            model_name=self.message_model_name,
+            assistant_message=self.assistant_message,
         )

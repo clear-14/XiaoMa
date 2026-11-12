@@ -227,7 +227,8 @@ def test_agent_plans_today_without_model_and_persists_history(api_env):
     assert resp.status_code == 200, resp.text
     events = _parse_sse(resp.text)
 
-    assert [event for event, _ in events] == ["start", "delta", "done"]
+    # V1.4 批次 5：Agent 从真实今日任务产出 task_card，事件序列新增 card。
+    assert [event for event, _ in events] == ["start", "delta", "card", "done"]
     start = events[0][1]
     assert start["intent"] == "planning"
     assert start["sub_intent"] == "today_tasks"
@@ -247,6 +248,14 @@ def test_agent_plans_today_without_model_and_persists_history(api_env):
     assert messages[1]["model_name"] is None
     assert messages[1]["content"] == reply
 
+    # 卡片由后端业务结果生成，并与文本一起持久化在同一条助手消息上。
+    card = events[2][1]
+    assert card["card_version"] == "v1"
+    assert card["message_type"] == "task_card"
+    assert card["structured_data"]["payload"]["knowledge_point_code"]
+    assert messages[1]["message_type"] == "task_card"
+    assert messages[1]["structured_data"]["cards"][0]["type"] == "task_card"
+
 
 def test_agent_teaching_streams_model_reply(api_env, monkeypatch):
     client, factory = api_env
@@ -261,7 +270,10 @@ def test_agent_teaching_streams_model_reply(api_env, monkeypatch):
     assert resp.status_code == 200, resp.text
     events = _parse_sse(resp.text)
 
-    assert [event for event, _ in events] == ["start", "delta", "delta", "done"]
+    # V1.4 批次 5：教学回复同时下发 lesson_card（知识点来自学习上下文）。
+    assert [event for event, _ in events] == [
+        "start", "delta", "delta", "card", "done",
+    ]
     assert events[0][1]["intent"] == "teaching"
     assert events[0][1]["model"] == "test-model"
     assert _reply_text(events) == "变量是保存数据的名字。"
@@ -275,6 +287,14 @@ def test_agent_teaching_streams_model_reply(api_env, monkeypatch):
     assert messages[-1]["status"] == "completed"
     assert messages[-1]["model_name"] == "test-model"
     assert messages[-1]["content"] == "变量是保存数据的名字。"
+
+    card = events[3][1]
+    assert card["message_type"] == "lesson_card"
+    assert card["structured_data"]["payload"]["explanation"] == (
+        "变量是保存数据的名字。"
+    )
+    assert messages[-1]["message_type"] == "lesson_card"
+    assert messages[-1]["structured_data"]["cards"][0]["type"] == "lesson_card"
 
 
 def test_agent_progress_uses_real_statistics(api_env):
@@ -368,7 +388,8 @@ def test_agent_analyzes_mistakes_from_real_attempts(api_env):
     assert events[-1][1]["result_status"] == "ok"
 
 
-def test_agent_adjust_plan_creates_pending_draft_only(api_env):
+def test_agent_adjust_plan_creates_proposal_only(api_env):
+    """阶段 6：Agent 只生成待确认提案，确认前不写任何计划版本。"""
     client, factory = api_env
     _seed(factory)
     _set_profile(client)
@@ -385,19 +406,35 @@ def test_agent_adjust_plan_creates_pending_draft_only(api_env):
 
     assert events[0][1]["sub_intent"] == "adjust_plan"
     reply = _reply_text(events)
-    assert "调整草案" in reply
-    assert "尚未生效" in reply
+    assert "待确认方案" in reply
+    assert "尚未保存" in reply
 
+    # 确认前：计划完全没变，也没有待确认草案
     plan = client.get("/api/v1/plans/current")
     assert plan.status_code == 200, plan.text
     data = plan.json()
     assert data["id"] == plan_id
     assert data["current_version_number"] == 1
-    assert data["pending_version_number"] == 2
-    assert data["pending_version"]["daily_study_minutes"] == 30
-    assert data["pending_version"]["expected_duration_days"] == 20
-    # Agent 不得自动确认草案
+    assert data["pending_version_number"] is None
     assert data["current_version"]["daily_study_minutes"] == 45
+
+    proposals = client.get("/api/v1/plan-adjustments/proposals").json()
+    assert len(proposals) == 1
+    proposal = proposals[0]
+    assert proposal["status"] == "proposed"
+    assert proposal["requires_confirmation"] is True
+    assert proposal["changes"]["daily_study_minutes"] == 30
+    assert proposal["changes"]["expected_duration_days"] == 20
+
+    # 用户确认后才生成并生效新版本
+    confirm = client.post(
+        f"/api/v1/plan-adjustments/proposals/{proposal['id']}/confirm"
+    )
+    assert confirm.status_code == 200, confirm.text
+    confirmed = client.get("/api/v1/plans/current").json()
+    assert confirmed["current_version_number"] == 2
+    assert confirmed["current_version"]["daily_study_minutes"] == 30
+    assert confirmed["current_version"]["expected_duration_days"] == 20
 
 
 def test_agent_adjust_plan_asks_for_parameters_without_changing_plan(api_env):
@@ -413,7 +450,8 @@ def test_agent_adjust_plan_asks_for_parameters_without_changing_plan(api_env):
     reply = _reply_text(events)
 
     assert "请告诉我" in reply
-    assert "不会立即生效" in reply
+    assert "待确认提案" in reply
+    assert "确认前不会保存" in reply
     plan = client.get("/api/v1/plans/current")
     assert plan.status_code == 200, plan.text
     data = plan.json()

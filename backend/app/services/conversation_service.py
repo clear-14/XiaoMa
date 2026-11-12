@@ -28,6 +28,13 @@ from app.repositories.course_repository import CourseRepository
 from app.repositories.daily_task_repository import DailyTaskRepository
 from app.repositories.learning_profile_repository import LearningProfileRepository
 from app.repositories.profile_repository import ProfileRepository
+from app.schemas.cards import (
+    CARD_VERSION,
+    build_error_card,
+    build_structured_data,
+    card_version_for,
+    message_type_for,
+)
 from app.schemas.conversation import (
     ConversationCreate,
     ConversationDetailOut,
@@ -132,6 +139,19 @@ class ConversationService:
         messages = self.repo.get_messages(conversation.id)
         return self._detail_out(conversation, messages=messages)
 
+    # ------------------------------------------------------------- 重命名会话
+
+    def rename_conversation(
+        self, conversation_id: uuid.UUID, title: str
+    ) -> ConversationDetailOut:
+        """V1.4：只更新标题，不动消息、知识点关联与学习会话。"""
+        conversation = self._get_or_404(conversation_id)
+        conversation.title = title
+        conversation.updated_at = utc_now_naive()
+        self.db.commit()
+        messages = self.repo.get_messages(conversation.id)
+        return self._detail_out(conversation, messages=messages)
+
     # ------------------------------------------------------------- 删除会话
 
     def delete_conversation(self, conversation_id: uuid.UUID) -> None:
@@ -148,6 +168,7 @@ class ConversationService:
         content: str,
         *,
         require_llm: bool = True,
+        existing_user_message: Message | None = None,
     ) -> ChatContext:
         """校验上下文，保存用户消息，构造本轮 Agent 请求。
 
@@ -194,19 +215,32 @@ class ConversationService:
             user, knowledge_point, conversation.daily_task, learning_status
         )
 
-        user_message = Message(
-            conversation_id=conversation.id,
-            role="user",
-            content=content,
-            status="completed",
-        )
-        self.repo.add_message(user_message)
+        if existing_user_message is None:
+            user_message = Message(
+                conversation_id=conversation.id,
+                role="user",
+                content=content,
+                status="completed",
+            )
+            self.repo.add_message(user_message)
+            learning_session.message_count += 1
+        else:
+            # V1.4 重新生成：复用原始用户消息，不重复写库、不重复计数
+            user_message = existing_user_message
         conversation.updated_at = now
-        learning_session.message_count += 1
         learning_session.last_activity_at = now
         self.db.commit()
 
         recent = self.repo.get_messages(conversation.id, limit=CONTEXT_FETCH_LIMIT)
+        if existing_user_message is not None:
+            # 上下文截止到被重生成回复所依赖的那条用户消息，
+            # 不把旧回复（含失败/停止的半成品）再次喂给模型。
+            cut = next(
+                (i for i, item in enumerate(recent) if item.id == user_message.id),
+                None,
+            )
+            if cut is not None:
+                recent = recent[: cut + 1]
         context_messages = [
             message for message in recent if _is_context_message(message)
         ][-CONTEXT_MESSAGE_LIMIT:]
@@ -224,7 +258,61 @@ class ConversationService:
             learning_status=learning_status,
         )
 
+    # ------------------------------------------------------------- 重新生成
+
+    def get_regeneration_source(
+        self, conversation_id: uuid.UUID, assistant_message_id: uuid.UUID
+    ) -> tuple[str, Message]:
+        """V1.4：校验并返回可重新生成的原始用户消息（只读，不写库）。
+
+        只允许普通文本回复；卡片消息、用户消息、不存在的消息一律拒绝，
+        避免重新生成把交互卡片或失败状态重新算一遍。
+        """
+        conversation = self._get_or_404(conversation_id)
+        messages = self.repo.get_messages(conversation.id)
+        target = next(
+            (item for item in messages if item.id == assistant_message_id), None
+        )
+        if target is None or target.role != "assistant":
+            raise HTTPException(status_code=404, detail="待重新生成的助手消息不存在")
+        if target.message_type != "text":
+            raise HTTPException(status_code=422, detail="仅普通文本回复支持重新生成")
+        source: Message | None = None
+        for message in messages:
+            if message.id == target.id:
+                break
+            if message.role == "user" and _is_context_message(message):
+                source = message
+        if source is None:
+            raise HTTPException(status_code=409, detail="找不到该回复对应的用户消息")
+        return source.content, source
+
     # ------------------------------------------------------- AI 回复持久化
+
+    def begin_assistant_message(self, context: ChatContext) -> Message:
+        """V1.4：生成开始时预建 status=streaming 的助手消息。
+
+        这样 SSE 的 ``card`` 事件能带上真实 message_id，且刷新时不会凭空
+        冒出「生成中」以外的半成品。计数在创建时 +1，后续完成/失败/停止
+        只更新同一行，不再新增消息行。
+        """
+        now = utc_now_naive()
+        message = Message(
+            conversation_id=context.conversation.id,
+            role="assistant",
+            content="",
+            status="streaming",
+            message_type="text",
+            structured_data=None,
+            card_version=None,
+            model_name=context.model_name,
+        )
+        self.repo.add_message(message)
+        context.conversation.updated_at = now
+        context.learning_session.message_count += 1
+        context.learning_session.last_activity_at = now
+        self.db.commit()
+        return message
 
     def complete_assistant_message(
         self,
@@ -232,18 +320,26 @@ class ConversationService:
         content: str,
         *,
         model_name: str | None | object = _MODEL_NAME_FROM_CONTEXT,
+        assistant_message: Message | None = None,
+        cards: list[dict] | None = None,
     ) -> Message:
         """保存成功的 AI 回复（status=completed）。
 
         非教学子图不调用模型，显式传 model_name=None，避免把数据查询回答
-        误标为由某个模型生成。
+        误标为由某个模型生成。V1.4：卡片数据写在同一条助手消息上，
+        不新增消息行，message_count 口径不变。
         """
+        structured_data = build_structured_data(cards)
         return self._record_assistant_message(
             context,
             content=content,
             status="completed",
             error_message=None,
             model_name=model_name,
+            assistant_message=assistant_message,
+            message_type=message_type_for(cards),
+            structured_data=structured_data,
+            card_version=card_version_for(cards),
         )
 
     def fail_assistant_message(
@@ -253,14 +349,44 @@ class ConversationService:
         error_message: str,
         *,
         model_name: str | None | object = _MODEL_NAME_FROM_CONTEXT,
+        assistant_message: Message | None = None,
     ) -> Message:
-        """保存失败的 AI 回复：保留已生成部分文本并明确标记失败（不伪造回复）。"""
+        """保存失败的 AI 回复：保留已生成部分文本并明确标记失败（不伪造回复）。
+
+        V1.4：失败态按契约降级写 error_card，卡片不引用任何业务写操作。
+        """
+        reason = error_message[:ERROR_MESSAGE_MAX_LENGTH]
         return self._record_assistant_message(
             context,
             content=partial_content or "",
             status="error",
-            error_message=error_message[:ERROR_MESSAGE_MAX_LENGTH],
+            error_message=reason,
             model_name=model_name,
+            assistant_message=assistant_message,
+            message_type="error_card",
+            structured_data=build_structured_data([build_error_card(reason)]),
+            card_version=CARD_VERSION,
+        )
+
+    def stop_assistant_message(
+        self,
+        context: ChatContext,
+        partial_content: str,
+        *,
+        model_name: str | None | object = _MODEL_NAME_FROM_CONTEXT,
+        assistant_message: Message | None = None,
+    ) -> Message:
+        """V1.4：用户主动停止。保留部分文本，状态为 stopped，绝不伪装成功。"""
+        return self._record_assistant_message(
+            context,
+            content=partial_content or "",
+            status="stopped",
+            error_message="用户已停止生成",
+            model_name=model_name,
+            assistant_message=assistant_message,
+            message_type="text",
+            structured_data=None,
+            card_version=None,
         )
 
     def _record_assistant_message(
@@ -271,6 +397,10 @@ class ConversationService:
         status: str,
         error_message: str | None,
         model_name: str | None | object,
+        assistant_message: Message | None = None,
+        message_type: str = "text",
+        structured_data: dict | None = None,
+        card_version: str | None = None,
     ) -> Message:
         now = utc_now_naive()
         resolved_model_name = (
@@ -278,19 +408,35 @@ class ConversationService:
             if model_name is _MODEL_NAME_FROM_CONTEXT
             else model_name
         )
-        message = Message(
-            conversation_id=context.conversation.id,
-            role="assistant",
-            content=content,
-            status=status,
-            error_message=error_message,
-            model_name=resolved_model_name,
-        )
-        self.repo.add_message(message)
-        # message 的新增不会触发 conversation 的 onupdate，显式刷新活动时间，
+        if assistant_message is None:
+            # 兼容未走 begin_assistant_message 的调用路径：新建一行并计数
+            message = Message(
+                conversation_id=context.conversation.id,
+                role="assistant",
+                content=content,
+                status=status,
+                error_message=error_message,
+                model_name=resolved_model_name,
+                message_type=message_type,
+                structured_data=structured_data,
+                card_version=card_version,
+            )
+            self.repo.add_message(message)
+            context.learning_session.message_count += 1
+        else:
+            # 生成开始时已建 streaming 行且已计数，这里只做终态更新，
+            # 保证「一条回复 = 一行消息 = 一次计数」。
+            message = assistant_message
+            message.content = content
+            message.status = status
+            message.error_message = error_message
+            message.model_name = resolved_model_name
+            message.message_type = message_type
+            message.structured_data = structured_data
+            message.card_version = card_version
+        # message 的更新不会触发 conversation 的 onupdate，显式刷新活动时间，
         # 保证会话列表按最近活动排序
         context.conversation.updated_at = now
-        context.learning_session.message_count += 1
         context.learning_session.last_activity_at = now
         self.db.commit()
         return message
@@ -377,6 +523,9 @@ class ConversationService:
             error_message=message.error_message,
             model_name=message.model_name,
             created_at=message.created_at,
+            message_type=message.message_type,
+            structured_data=message.structured_data,
+            card_version=message.card_version,
         )
 
 

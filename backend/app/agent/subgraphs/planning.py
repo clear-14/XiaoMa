@@ -4,8 +4,9 @@
       plan_overview / adjust_plan）。
 输出：reply（给用户的明确回答）、tool_results、result_status。
 
-调整计划始终调用 PlanService：后端生成「待确认草案」，Agent 绝不自动确认，
-也不会声称草案已生效；无明确参数时只询问，不擅自修改计划。
+调整计划只经 AgentToolbox → PlanAdjustmentService 生成「待确认提案」：
+后端不产生任何计划版本，也不由 Agent 自动确认；确认入口只开放给用户。
+无明确参数时只询问，不擅自修改计划。
 """
 
 from __future__ import annotations
@@ -52,7 +53,12 @@ def build_planning_subgraph(toolbox: AgentToolbox):
             plan_changes = _extract_plan_changes(state["user_message"])
             if plan_changes and results["plan"].ok:
                 plan: CurrentPlanOut = results["plan"].data
-                results["adjust"] = toolbox.adjust_plan(plan.id, plan_changes)
+                # 阶段 6：只生成待确认提案，绝不写计划版本、绝不自动确认。
+                results["adjust"] = toolbox.propose_learning_plan_adjustment(
+                    plan_changes,
+                    reason="用户请求调整学习计划",
+                    plan_id=plan.id,
+                )
         else:
             results["plan"] = toolbox.get_current_plan()
 
@@ -311,7 +317,7 @@ def _compose_adjust_plan(
                 f"期望 {current.expected_duration_days} 天 / "
                 f"目标「{current.learning_goal}」。"
             )
-        lines.append("调整会先生成待确认草案，不会立即生效。")
+        lines.append("调整会先生成待确认提案，确认前不会保存或生效任何计划修改。")
         return "\n".join(lines), "ok"
 
     if adjust_result is None:
@@ -324,28 +330,30 @@ def _compose_adjust_plan(
             "unavailable",
         )
 
-    adjusted: CurrentPlanOut = adjust_result.data
-    pending = adjusted.pending_version
-    if pending is None:
-        return (
-            "调整请求已提交，但没有返回待确认草案。请到「学习计划」页面查看当前状态。",
-            "unavailable",
-        )
-
-    lines = [f"已生成学习计划调整草案（版本 {pending.version_number}），尚未生效："]
+    adjusted = adjust_result.data
+    preview = adjusted.preview or {}
+    lines = [
+        f"已生成学习计划调整提案（{adjusted.id}），这是待确认方案，"
+        "尚未保存为生效计划："
+    ]
     lines.append("")
-    lines.append(f"- 每日学习时间：{pending.daily_study_minutes} 分钟")
-    lines.append(f"- 期望周期：{pending.expected_duration_days} 天")
-    lines.append(f"- 预计需要：{pending.computed_duration_days} 天")
-    if pending.warning:
-        lines.append(f"- 计划提示：{pending.warning}")
+    proposed = preview.get("proposed", {})
+    if proposed:
+        lines.append(f"- 每日学习时间：{proposed.get('daily_study_minutes')} 分钟")
+        lines.append(f"- 期望周期：{proposed.get('expected_duration_days')} 天")
+        lines.append(f"- 学习目标：{proposed.get('learning_goal')}")
+    for impact in preview.get("impacts", []):
+        lines.append(f"- {impact}")
+    if adjusted.trigger_labels:
+        lines.append(f"- 触发条件：{'、'.join(adjusted.trigger_labels)}")
     lines.append("")
-    if adjusted.current_version_number is not None:
+    if plan.current_version_number is not None:
         lines.append(
-            f"当前生效版本仍是版本 {adjusted.current_version_number}。"
+            f"当前生效版本仍是版本 {plan.current_version_number}，本次没有写入任何计划版本。"
         )
     lines.append(
-        "请到「学习计划」页面确认草案后才会应用；在确认前，学习安排不会改变。"
+        "请先查看方案，再到「学习计划」页或调整提案确认接口确认；"
+        "确认前学习计划不会改变，我也不会替你自动确认。"
     )
     return "\n".join(lines), "ok"
 

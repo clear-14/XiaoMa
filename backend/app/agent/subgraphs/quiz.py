@@ -1,12 +1,12 @@
-"""Quiz Subgraph：生成测验与查看测验记录。
+"""Quiz Subgraph：生成测验、查看测验记录与查看最近一次成绩。
 
-输入：用户消息、学习上下文、Quiz 意图（generate_quiz / quiz_history）。
+输入：用户消息、学习上下文、Quiz 意图（generate_quiz / quiz_history / quiz_result）。
 输出：reply、tool_results、result_status。
 
 所有组卷与范围校验都由 QuizService 完成：
 - 未学习的知识点不会进入正式测验；
 - 题量、总分以 Service 返回为准，不虚报；
-- 聊天中不返回未作答测验的答案与解析。
+- 聊天中不返回未作答测验的答案与解析（quiz_result 只读已提交并已评分的结果）。
 """
 
 from __future__ import annotations
@@ -44,6 +44,10 @@ def build_quiz_subgraph(toolbox: AgentToolbox):
         if state["intent"].sub_intent == "quiz_history":
             results["attempts"] = toolbox.get_quiz_attempts()
             return {"tool_results": results}
+        if state["intent"].sub_intent == "quiz_result":
+            # 批次 8：只读最近一次已提交测验，提交动作仍然只走 REST。
+            results["quiz_result"] = toolbox.get_latest_quiz_result()
+            return {"tool_results": results}
 
         scope = _resolve_scope(state["user_message"], state["context"], toolbox, results)
         if scope is None:
@@ -61,6 +65,8 @@ def build_quiz_subgraph(toolbox: AgentToolbox):
         results = state["tool_results"]
         if state["intent"].sub_intent == "quiz_history":
             reply, status = _compose_history(results["attempts"])
+        elif state["intent"].sub_intent == "quiz_result":
+            reply, status = _compose_result(results["quiz_result"])
         elif "quiz" not in results:
             reply, status = _compose_missing_scope(state["quiz_scope"])
         else:
@@ -255,4 +261,52 @@ def _compose_history(result: ToolResult) -> tuple[str, str]:
         lines.append(f"你有 {len(pending)} 次测验尚未提交，建议先完成后再开始新的测验。")
     else:
         lines.append("可以继续说「为当前章节生成测验」，开始一次新的测验。")
+    return "\n".join(lines), "ok"
+
+
+# ---------------------------------------------------------------- 最近一次成绩
+
+def _points(value: float | None) -> str:
+    """分数展示：整数不带小数点，非整数保留原值，缺失如实写「—」。"""
+    if value is None:
+        return "—"
+    number = float(value)
+    return str(int(number)) if number.is_integer() else f"{number:g}"
+
+
+def _compose_result(result: ToolResult) -> tuple[str, str]:
+    """已提交并已评分的测验结果：数字全部来自 Service，不自行推算。"""
+    require_ok(result, "读取测验结果")
+    if result.status == "unavailable":
+        return (
+            unavailable_message(result, "查看测验成绩")
+            + "\n\n你可以说「为当前章节生成测验」，先完成一次测验。",
+            "unavailable",
+        )
+
+    attempt: QuizAttemptOut = result.data
+    correct = sum(1 for question in attempt.questions if question.is_correct is True)
+    wrong = sum(1 for question in attempt.questions if question.is_correct is False)
+
+    lines = [f"最近一次测验：「{attempt.scope_name}」", ""]
+    lines.append(
+        f"- 得分：{_points(attempt.score)} / {_points(attempt.total_points)} 分"
+    )
+    lines.append(f"- 答题：答对 {correct} 题，答错 {wrong} 题")
+    lines.append(f"- 提交时间：{format_date(attempt.submitted_at)}")
+
+    if attempt.mastery_updates:
+        lines.append("")
+        lines.append("掌握度变化：")
+        for item in attempt.mastery_updates:
+            label = "已达成" if item.achieved else "未达成"
+            lines.append(f"- {item.knowledge_point_name}：{label}")
+
+    lines.append("")
+    if wrong:
+        lines.append(
+            "答错的题已进入错题本并生成复习任务，可以说「帮我复习错题」查看。"
+        )
+    else:
+        lines.append("本次没有答错的题，可以说「为当前章节生成测验」继续巩固。")
     return "\n".join(lines), "ok"

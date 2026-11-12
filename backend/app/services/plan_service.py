@@ -35,6 +35,9 @@ from app.schemas.plan import (
     PlanVersionOut,
     PlanVersionSummary,
 )
+from app.services.course_publication_service import CoursePublicationService
+from app.services.mastery_service import MasteryService
+from app.services.plan_context_service import PlanContextService
 from app.services.plan_scheduler import build_schedule, computed_duration_days, validate_schedule
 from app.services.profile_service import DEFAULT_USERNAME
 from app.services.time_utils import utc_today_naive
@@ -67,13 +70,38 @@ class PlanService:
                 status_code=409,
                 detail="已存在学习计划，如需修改请使用调整接口",
             )
-        kps = self._course_kps(payload.course_code)
-        mastered = self._validate_mastered_codes(payload.mastered_kp_codes, kps)
+        # 阶段 6：只允许正式发布的课程进入计划，且每个知识点必须归属真实
+        # 课时（不能把草稿课程或不存在的课时加入正式学习计划）。
+        snapshot = CoursePublicationService(self.db).require_published(
+            payload.course_code
+        )
+        kps = snapshot.knowledge_points
+        # 自述只作为「待验证线索」记录，不参与跳过（阶段 5 规则）。
+        claimed = self._validate_mastered_codes(payload.mastered_kp_codes, kps)
+        mastery_service = MasteryService(self.db)
+        if claimed:
+            mastery_service.report_self_completed(
+                sorted(claimed), note="创建学习计划时提交的自述"
+            )
+        # 排期跳过只认掌握证据：知识点测验或诊断测验通过（MASTERED）。
+        verified = mastery_service.mastered_kp_codes() & {kp.code for kp in kps}
 
-        schedule = build_schedule(kps, mastered, payload.daily_study_minutes)
-        self._validate_generated_schedule(schedule, kps, mastered)
+        schedule = build_schedule(kps, verified, payload.daily_study_minutes)
+        self._validate_generated_schedule(schedule, kps, verified)
 
-        course = self.course_repo.get_course_by_code(payload.course_code)
+        # 八类输入快照（学习目标、每日时间、能力等级、已掌握/未掌握、课程
+        # 前置、课程预计时间、测验表现、诊断证据），供审计与前端展示。
+        plan_context = PlanContextService(self.db).collect(
+            user_id=user.id,
+            snapshot=snapshot,
+            kps=kps,
+            learning_goal=payload.learning_goal,
+            daily_study_minutes=payload.daily_study_minutes,
+            current_level=payload.current_level,
+            mastered=verified,
+        )
+
+        course = snapshot.course
         plan = LearningPlan(
             user_id=user.id,
             course_id=course.id,
@@ -89,7 +117,9 @@ class PlanService:
             expected_duration_days=payload.expected_duration_days,
             current_level=payload.current_level,
             schedule=schedule,
-            mastered=mastered,
+            mastered=verified,
+            claimed=claimed,
+            plan_context=plan_context.as_dict(),
         )
         self.db.add_all([plan, version])
         self.db.commit()
@@ -131,17 +161,34 @@ class PlanService:
         learning_goal = payload.learning_goal or base.learning_goal
         daily_minutes = payload.daily_study_minutes or base.daily_study_minutes
         expected_days = payload.expected_duration_days or base.expected_duration_days
-        mastered = set(base.mastered_kp_codes or [])
+        # 调整时重新按证据计算跳过集合：期间通过诊断测验验证的知识点，
+        # 下一次调整就该被跳过，而不是沿用旧版本的判断。
+        mastery_service = MasteryService(self.db)
+        mastered = mastery_service.mastered_kp_codes()
+        claimed = set(base.self_reported_kp_codes or [])
 
         # 已完成项目携带（保留 day_index / completed_at），剩余知识点重新排期
         completed_items = [item for item in base.items if item.status == "completed"]
         # 排期排除条件按知识点稳定 code 比较（与 mastered_codes 口径一致）
         completed_codes = {item.knowledge_point.code for item in completed_items}
-        kps = self._course_kps(plan.course.code)
+        # 调整同样只允许正式发布课程与真实课时（阶段 6）。
+        snapshot = CoursePublicationService(self.db).require_published(
+            plan.course.code
+        )
+        kps = snapshot.knowledge_points
         schedule = build_schedule(kps, mastered | completed_codes, daily_minutes)
         # 结构校验的「已知集合」= 已掌握 ∪ 已完成：
         # 已完成知识点虽不重新排期，但满足其后置知识点的前置依赖
         self._validate_generated_schedule(schedule, kps, mastered | completed_codes)
+        plan_context = PlanContextService(self.db).collect(
+            user_id=user.id,
+            snapshot=snapshot,
+            kps=kps,
+            learning_goal=learning_goal,
+            daily_study_minutes=daily_minutes,
+            current_level=base.current_level,
+            mastered=mastered | completed_codes,
+        )
 
         # 版本号：已有待确认草稿则原地重建（同一编号），否则在最大编号上 +1
         if plan.pending_version_number is not None:
@@ -161,6 +208,8 @@ class PlanService:
             current_level=base.current_level,
             schedule=schedule,
             mastered=mastered,
+            claimed=claimed,
+            plan_context=plan_context.as_dict(),
         )
         for item in completed_items:
             version.items.append(
@@ -260,6 +309,8 @@ class PlanService:
         current_level: str | None,
         schedule: list[tuple[KnowledgePoint, int]],
         mastered: set[str],
+        claimed: set[str] | None = None,
+        plan_context: dict | None = None,
     ) -> LearningPlanVersion:
         version = LearningPlanVersion(
             plan=plan,
@@ -270,7 +321,12 @@ class PlanService:
             expected_duration_days=expected_duration_days,
             computed_duration_days=computed_duration_days(schedule),
             current_level=current_level,
+            # mastered_kp_codes 自阶段 5 起只装「有掌握证据、实际被跳过」的知识点
             mastered_kp_codes=sorted(mastered) or None,
+            # 自述完成但未验证的知识点另存一列，保留用户当时的说法
+            self_reported_kp_codes=sorted(claimed or set()) or None,
+            # 阶段 6：生成该版本时实际使用的八类输入快照
+            plan_context=plan_context,
         )
         version.items = [
             LearningPlanItem(knowledge_point_id=kp.id, day_index=day, status="pending")
@@ -303,6 +359,9 @@ class PlanService:
             version.items,
             key=lambda item: (item.day_index, item.knowledge_point.code),
         )
+        mastered = version.mastered_kp_codes or []
+        claimed = version.self_reported_kp_codes or []
+        pending = sorted(set(claimed) - set(mastered))
         return PlanVersionOut(
             version_number=version.version_number,
             status=version.status,
@@ -313,6 +372,16 @@ class PlanService:
             warning=_warning(version),
             current_level=version.current_level,
             mastered_kp_codes=version.mastered_kp_codes,
+            skipped_kp_codes=mastered,
+            self_reported_kp_codes=version.self_reported_kp_codes,
+            pending_verification_kp_codes=pending,
+            skip_note=(
+                f"自述完成 {len(pending)} 个知识点但尚无掌握证据，仍需按计划学习或先做诊断测验验证；"
+                f"实际跳过 {len(mastered)} 个"
+                if pending
+                else None
+            ),
+            plan_context=version.plan_context or {},
             created_at=version.created_at,
             items=[
                 PlanItemOut(

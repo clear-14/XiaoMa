@@ -7,18 +7,29 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.v1.auth import router as auth_router
 from app.api.v1.conversations import router as conversations_router
+from app.api.v1.course_catalog import router as course_catalog_router
 from app.api.v1.courses import router as courses_router
 from app.api.v1.daily_tasks import router as daily_tasks_router
+from app.api.v1.data import router as data_router
+from app.api.v1.diagnosis import router as diagnosis_router
 from app.api.v1.health import router as health_router
 from app.api.v1.knowledge_points import router as knowledge_points_router
+from app.api.v1.learning_loop import router as learning_loop_router
+from app.api.v1.lessons import router as lessons_router
 from app.api.v1.llm import router as llm_router
+from app.api.v1.mastery import router as mastery_router
 from app.api.v1.mistakes import router as mistakes_router
 from app.api.v1.model_configs import router as model_configs_router
 from app.api.v1.plans import router as plans_router
 from app.api.v1.profile import router as profile_router
+from app.api.v1.progress import router as progress_router
 from app.api.v1.quizzes import router as quizzes_router
 from app.api.v1.reviews import router as reviews_router
+from app.api.v1.study import router as study_router
+from app.api.v1.textbook import router as textbook_router
+from app.core.access_middleware import AccessControlMiddleware
 from app.core.config import get_settings
 
 # uvicorn 只配置自身的 logger；显式配置根日志级别，确保 Agent 执行日志
@@ -38,6 +49,10 @@ app = FastAPI(
     version=settings.app_version,
 )
 
+# 访问保护必须由后端强制执行（PRD 11.1）。先加入 AccessControlMiddleware，
+# 再加入 CORS，使 CORS 位于最外层：登录失败等 401 响应也能带上跨域头。
+app.add_middleware(AccessControlMiddleware)
+
 # 前端（浏览器）直接调用后端 API 与 SSE 流，需要跨域许可。
 # 默认仅允许本机任意端口的前端来源，避免任意网站读取本地学习数据；
 # 局域网/自定义域名部署时通过 CORS_ALLOW_ORIGINS 显式追加。
@@ -55,14 +70,24 @@ app.add_middleware(
 
 for router in (
     health_router,
+    auth_router,
+    data_router,
     courses_router,
+    course_catalog_router,
     knowledge_points_router,
+    lessons_router,
+    textbook_router,
     plans_router,
     daily_tasks_router,
+    study_router,
+    progress_router,
     conversations_router,
     model_configs_router,
     llm_router,
     profile_router,
+    mastery_router,
+    diagnosis_router,
+    learning_loop_router,
     quizzes_router,
     mistakes_router,
     reviews_router,

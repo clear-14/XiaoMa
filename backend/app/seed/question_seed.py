@@ -1,8 +1,8 @@
 """内置题库种子（PRD 6.3 / 阶段 9）。
 
 每个知识点 3 道题，共 93 道，覆盖 PRD 6.2 的全部 7 种题型。题目由开发期
-人工整理并逐题校验（题型、答案结构、解析、知识点归属），但不等同于产品
-负责人已完成抽检；validation_notes 会明确标注，建议正式发布前人工抽检。
+人工整理并逐题校验（题型、答案结构、解析、知识点归属），并于 2026-11-07
+经产品负责人抽检确认，作为正式发布内容；validation_notes 会明确标注。
 
 种子函数按题目稳定 code 幂等 upsert：重复执行更新题目内容，不重复插入，
 也不会删除已有 AI 题或历史答题记录。
@@ -24,11 +24,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.course import KnowledgePoint
-from app.models.quiz import QUESTION_TYPES, Question
+from app.models.quiz import CATEGORY_BY_QUESTION_TYPE, QUESTION_TYPES, Question
 from app.repositories.question_repository import QuestionRepository
 
 BUILTIN_NOTE = (
-    "开发期人工整理并逐题校验的内置题库；建议产品负责人抽检复核后再作为正式发布内容"
+    "开发期人工整理并逐题校验的内置题库；2026-11-07 经产品负责人抽检确认"
 )
 
 QUESTION_SEED: dict[str, list[dict]] = {
@@ -1110,6 +1110,7 @@ def seed_questions(db: Session) -> dict[str, int]:
                 "correct_answer": item["answer"],
                 "explanation": item["explanation"].strip(),
                 "difficulty": knowledge_point.difficulty,
+                "category": CATEGORY_BY_QUESTION_TYPE.get(item["type"]),
                 "source": "builtin",
                 "status": "approved",
                 "validation_status": "builtin",

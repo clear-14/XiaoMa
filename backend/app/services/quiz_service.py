@@ -53,12 +53,9 @@ from app.schemas.quiz import (
 )
 from app.services.ai_question_service import MAX_AI_VARIANTS, AiQuestionService
 from app.services.profile_service import DEFAULT_USERNAME
-from app.services.quiz_grading import (
-    MASTERY_MIN_QUESTIONS,
-    MASTERY_MIN_SCORE,
-    grade_answer,
-)
+from app.services.quiz_grading import grade_answer
 from app.services.quiz_presenters import knowledge_point_out, question_out
+from app.services.mastery_service import MasteryService
 from app.services.review_service import ReviewService
 from app.services.time_utils import utc_now_naive
 
@@ -345,6 +342,7 @@ class QuizService:
                 scope_type=attempt.scope_type,
                 scope_name=attempt.scope_name,
                 status=attempt.status,
+                purpose=attempt.purpose or "practice",
                 question_count=attempt.question_count,
                 score=attempt.score,
                 ai_accepted=attempt.ai_accepted,
@@ -357,6 +355,10 @@ class QuizService:
     def get_attempt(self, attempt_id: uuid.UUID) -> QuizAttemptOut:
         user = self._get_or_create_user()
         attempt = self._get_attempt_or_404(attempt_id, user)
+        return self._attempt_out(attempt)
+
+    def present_attempt(self, attempt: QuizAttempt) -> QuizAttemptOut:
+        """把已构造好的测验对象序列化为接口输出（诊断测验生成后直接返回）。"""
         return self._attempt_out(attempt)
 
     # ------------------------------------------------------------- 提交评分
@@ -398,16 +400,11 @@ class QuizService:
         attempt.score = round(gained / total * 100, 1) if total else 0.0
         attempt.status = "submitted"
         attempt.submitted_at = now
-        attempt.mastery_updates = (
-            [self._mastery_update(attempt)]
-            if attempt.scope_type == "knowledge_point"
-            else []
-        )
-        if attempt.scope_type == "knowledge_point":
-            update = attempt.mastery_updates[0]
-            if update["achieved"]:
-                target = attempt.answers[0].question.knowledge_point
-                self.learning_profile_repo.set_mastered(user.id, target.id, now)
+        # 掌握判定统一交给掌握度服务（阶段 5）：
+        # 知识点测验与诊断（跳级）测验都会写 7 态掌握度 + 证据，
+        # 章节/阶段/复习测验只记成绩，不产生掌握证据。
+        updates = MasteryService(self.db).record_quiz_attempt(attempt)
+        attempt.mastery_updates = updates
 
         if wrong_answers:
             ReviewService(self.db).record_wrong_answers(
@@ -416,41 +413,6 @@ class QuizService:
 
         self.db.commit()
         return self._attempt_out(attempt)
-
-    def _mastery_update(self, attempt: QuizAttempt) -> dict:
-        """知识点测验的掌握判定；返回可持久化的判定快照与原因。"""
-        target = attempt.answers[0].question.knowledge_point
-        question_count = attempt.question_count
-        score = attempt.score or 0.0
-        wrong_count = sum(1 for answer in attempt.answers if not answer.is_correct)
-
-        reasons: list[str] = []
-        if question_count < MASTERY_MIN_QUESTIONS:
-            reasons.append(
-                f"有效题量 {question_count} 道少于 {MASTERY_MIN_QUESTIONS} 道，"
-                "无法完成掌握验证"
-            )
-        if wrong_count:
-            reasons.append(
-                f"仍有 {wrong_count} 道题未通过（主观题需关键词覆盖率达到 80%）"
-            )
-        if score < MASTERY_MIN_SCORE:
-            reasons.append(
-                f"百分制得分 {score} 低于 {MASTERY_MIN_SCORE:g} 分参考线"
-            )
-
-        achieved = not reasons
-        if achieved:
-            reasons.append(
-                "满足掌握条件：不少于 3 道题、全部题目通过、"
-                f"百分制得分不低于 {MASTERY_MIN_SCORE:g}"
-            )
-        return MasteryUpdateOut(
-            knowledge_point_code=target.code,
-            knowledge_point_name=target.name,
-            achieved=achieved,
-            reasons=reasons,
-        ).model_dump()
 
     # ------------------------------------------------------------- 内部工具
 
@@ -479,6 +441,7 @@ class QuizService:
             scope_ref=attempt.scope_ref,
             scope_name=attempt.scope_name,
             status=attempt.status,
+            purpose=attempt.purpose or "practice",
             question_count=attempt.question_count,
             total_points=attempt.total_points,
             score=attempt.score,

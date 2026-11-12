@@ -104,12 +104,18 @@ class QuizQuestionOut(BaseModel):
 
 
 class MasteryUpdateOut(BaseModel):
-    """一次测验对知识点掌握状态的判定结果（不满足条件时给出原因）。"""
+    """一次测验对知识点掌握状态的判定结果（不满足条件时给出原因）。
+
+    阶段 5 起同时返回 7 态掌握度（``status``/``status_label``）：
+    achieved 仍表示「是否达到 MASTERED」，便于既有调用方不变。
+    """
 
     knowledge_point_code: str
     knowledge_point_name: str
     achieved: bool
     reasons: list[str]
+    status: str | None = None
+    status_label: str | None = None
 
 
 class QuizAttemptOut(BaseModel):
@@ -120,6 +126,9 @@ class QuizAttemptOut(BaseModel):
     scope_ref: str | None
     scope_name: str
     status: str  # in_progress | submitted
+    # 阶段 5：practice=常规练习测验，placement=诊断（跳级）测验。
+    # 历史列表据此区分两类测验，避免「诊断验证」被当成普通练习记录。
+    purpose: str = "practice"
     question_count: int
     total_points: int
     score: float | None
@@ -139,6 +148,8 @@ class QuizAttemptSummaryOut(BaseModel):
     scope_type: str
     scope_name: str
     status: str
+    # 阶段 5：与 QuizAttemptOut 同源，保留测验用途供历史列表筛选
+    purpose: str = "practice"
     question_count: int
     score: float | None
     ai_accepted: int

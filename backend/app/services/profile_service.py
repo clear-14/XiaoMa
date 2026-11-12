@@ -35,11 +35,16 @@ class ProfileService:
         if user is None:
             user = self.repo.create_user_with_profile(DEFAULT_USERNAME)
             self.db.commit()
+        elif user.profile is None:
+            # 兼容早期版本创建的默认用户：补齐空白学习档案，
+            # 避免读取档案时出现 None 属性错误。
+            user.profile = UserProfile()
+            self.db.commit()
         return user
 
     @staticmethod
     def _to_out(user: User) -> ProfileOut:
-        profile = user.profile
+        profile = user.profile or UserProfile()
         return ProfileOut(
             username=user.username,
             learning_goal=profile.learning_goal,

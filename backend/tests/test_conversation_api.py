@@ -309,16 +309,27 @@ def test_stream_reply_is_persisted_and_history_survives(api_env, monkeypatch):
     events = _parse_sse(resp.text)
 
     assert events[0][0] == "start"
-    assert [e[0] for e in events] == ["start", "delta", "delta", "done"]
+    # V1.4 批次 5：teaching 意图在 done 之前下发一张讲解卡片（lesson_card）。
+    # 卡片一次性完整下发，不分片、不拼接，因此事件序列固定为单张 card。
+    assert [e[0] for e in events] == ["start", "delta", "delta", "card", "done"]
     assert "".join(e[1]["text"] for e in events if e[0] == "delta") == (
         "变量是保存数据的名字。"
+    )
+    card_frame = next(e[1] for e in events if e[0] == "card")
+    assert card_frame["card_version"] == "v1"
+    assert card_frame["message_type"] == "lesson_card"
+    assert card_frame["structured_data"]["type"] == "lesson_card"
+    assert card_frame["structured_data"]["payload"]["knowledge_point_code"] == KP_CODE
+    assert (
+        card_frame["structured_data"]["payload"]["explanation"]
+        == "变量是保存数据的名字。"
     )
     done = events[-1][1]
     assert done["title"] == "什么是变量？"
     assert done["model"] == "test-model"
     assert done["message_count"] == 2
 
-    # 刷新页面 → 重新查询历史，消息仍存在
+    # 刷新页面 → 重新查询历史，消息与卡片都仍存在
     detail = client.get(f"/api/v1/conversations/{conversation['id']}").json()
     assert detail["title"] == "什么是变量？"
     assert detail["message_count"] == 2
@@ -328,6 +339,17 @@ def test_stream_reply_is_persisted_and_history_survives(api_env, monkeypatch):
     assert assistant["content"] == "变量是保存数据的名字。"
     assert assistant["status"] == "completed"
     assert assistant["model_name"] == "test-model"
+    # 卡片附属于同一条助手消息：不新增消息行，只带结构化数据
+    assert card_frame["message_id"] == assistant["id"]
+    assert assistant["message_type"] == "lesson_card"
+    assert assistant["card_version"] == "v1"
+    collection = assistant["structured_data"]
+    assert collection["card_version"] == "v1"
+    assert [card["type"] for card in collection["cards"]] == ["lesson_card"]
+    assert (
+        collection["cards"][0]["payload"]["knowledge_point_name"]
+        == card_frame["structured_data"]["payload"]["knowledge_point_name"]
+    )
 
     listing = client.get("/api/v1/conversations").json()
     assert listing[0]["id"] == conversation["id"]

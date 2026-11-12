@@ -2,11 +2,19 @@
 
 from sqlalchemy import func, select
 
-from app.models.course import Chapter, Course, KnowledgePoint, KnowledgePointPrerequisite
+from app.models.course import (
+    Chapter,
+    Course,
+    KnowledgePoint,
+    KnowledgePointPrerequisite,
+    Lesson,
+)
 from app.seed.course_seed import SEED_COURSE, seed_courses
 
 EXPECTED_CHAPTERS = 6
 EXPECTED_KPS = 31
+# 阶段 2 课时目录：6 章拆成 14 个课时
+EXPECTED_LESSONS = 14
 
 
 def _expected_prereq_count() -> int:
@@ -24,11 +32,13 @@ def test_seed_twice_no_duplicates(db_session):
 
     assert first["courses"] == second["courses"] == 1
     assert first["chapters"] == second["chapters"] == EXPECTED_CHAPTERS
+    assert first["lessons"] == second["lessons"] == EXPECTED_LESSONS
     assert first["knowledge_points"] == second["knowledge_points"] == EXPECTED_KPS
     # 第二次执行不应新增任何前置关系
     assert second["prerequisites"] == 0
     assert db_session.scalar(select(func.count()).select_from(Course)) == 1
     assert db_session.scalar(select(func.count()).select_from(Chapter)) == EXPECTED_CHAPTERS
+    assert db_session.scalar(select(func.count()).select_from(Lesson)) == EXPECTED_LESSONS
     assert db_session.scalar(select(func.count()).select_from(KnowledgePoint)) == EXPECTED_KPS
     assert (
         db_session.scalar(select(func.count()).select_from(KnowledgePointPrerequisite))
@@ -103,7 +113,7 @@ def test_seed_course_content_complete(db_session):
     course = db_session.scalars(
         select(Course).where(Course.code == "python-basics")
     ).one()
-    assert course.name == "Python 通用基础"
+    assert course.name == "Python 零基础入门"
     assert course.description
 
     # 每个知识点必备字段完整且无空值
@@ -122,3 +132,27 @@ def test_seed_course_content_complete(db_session):
     assert [c.code for c in course_stored.chapters] == [
         f"python-basics-0{i}" for i in range(1, 7)
     ]
+
+
+def test_lesson_catalog_covers_every_knowledge_point(db_session):
+    """阶段 2：6 章拆成 14 个课时，31 个知识点全部有唯一归属。"""
+    seed_courses(db_session)
+
+    lessons = list(db_session.scalars(select(Lesson).order_by(Lesson.code)).all())
+    assert len(lessons) == EXPECTED_LESSONS
+    # 每章首个课时沿用阶段 1 迁移生成的默认课时 code，升级不产生重复课时
+    assert lessons[0].code == "python-basics-01-lesson-01"
+
+    total_linked = 0
+    for lesson in lessons:
+        # 课时预计时长由所属知识点汇总，不单独手填
+        assert lesson.estimated_minutes == sum(
+            kp.estimated_minutes for kp in lesson.knowledge_points
+        )
+        assert lesson.estimated_minutes > 0
+        total_linked += len(lesson.knowledge_points)
+    assert total_linked == EXPECTED_KPS
+
+    kps = list(db_session.scalars(select(KnowledgePoint)).all())
+    assert {kp.lesson.code for kp in kps} <= {lesson.code for lesson in lessons}
+    assert all(kp.lesson is not None for kp in kps)
