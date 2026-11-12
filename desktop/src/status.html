@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>小码 · 正在启动</title>
+<style>
+/*
+ * 窗口壳的服务状态页（Brutally minimal 极致极简）。
+ * 这是独立的 file:// 文档，服务尚未监听时就要显示，因此不引用 Next 层的
+ * 自托管字体、不做任何网络请求；主界面字体由 frontend/public/fonts 提供。
+ * 配色与设计令牌同 docs/V1.4技术设计与契约.md 第 6 节保持一致。
+ */
+:root {
+  --color-bg: #FAF8F5;
+  --color-surface: #FFFFFF;
+  --color-text: #1A1A18;
+  --color-muted: #6A6762;
+  --color-accent: #D8502A;
+  --color-border: rgba(26, 26, 24, 0.12);
+  --color-ok: #2F6B4F;
+  --color-fail: #B23A2B;
+  --space-1: 4px; --space-2: 8px; --space-3: 16px; --space-4: 24px;
+  --space-5: 40px; --space-6: 64px;
+  --radius-sm: 4px; --radius-md: 10px;
+  --shadow-1: 0 2px 8px rgba(26, 26, 24, 0.06);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 160ms; --dur-base: 320ms;
+  --font-mono: ui-monospace, "Cascadia Code", Consolas, "Liberation Mono", monospace;
+  --font-body: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  line-height: 1.7;
+  letter-spacing: 0.02em;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 氛围层：3% 噪点 + 一条发丝分隔线，不使用渐变网格。 */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0.03;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.window {
+  position: relative;
+  z-index: 1;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-5) var(--space-6) var(--space-4);
+  max-width: 780px;
+  margin: 0 auto;
+}
+
+/* 记忆点：贯穿窗口顶部的「今日学习刻度尺」，启动页给出第 0 格。 */
+.ruler { margin-bottom: var(--space-6); }
+.ruler-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+}
+.ruler-brand { color: var(--color-text); font-size: 13px; letter-spacing: 0.08em; }
+.ruler-line {
+  position: relative;
+  margin-top: var(--space-3);
+  height: 1px;
+  background: var(--color-border);
+}
+.ruler-line::before {
+  content: "";
+  position: absolute;
+  left: 0; top: -3px;
+  width: 7px; height: 7px;
+  background: var(--color-accent);
+  border-radius: 50%;
+}
+.ruler-ticks {
+  display: flex;
+  justify-content: space-between;
+  margin-top: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+main { flex: 1; }
+h1 {
+  margin: 0 0 var(--space-3);
+  font-size: clamp(24px, 3vw, 34px);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+}
+.lede {
+  margin: 0 0 var(--space-5);
+  max-width: 46ch;
+  color: var(--color-muted);
+  font-size: 15px;
+}
+
+.readout {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-1);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.readout-state {
+  min-width: 8ch;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.readout-timer { font-size: 20px; }
+.readout-unit { font-size: 11px; color: var(--color-muted); }
+.readout-bar {
+  flex: 1;
+  height: 2px;
+  background: var(--color-border);
+  overflow: hidden;
+  border-radius: 2px;
+}
+.readout-bar span {
+  display: block;
+  width: 32%;
+  height: 100%;
+  background: var(--color-accent);
+}
+[data-state="ready"] .readout-bar span { width: 100%; background: var(--color-ok); }
+[data-state="failed"] .readout-bar span { width: 100%; background: var(--color-fail); }
+[data-state="starting"] .readout-bar span {
+  animation: sweep 1.8s var(--ease-out) infinite alternate;
+}
+@keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(210%); } }
+
+.detail {
+  margin: var(--space-3) 0 0;
+  min-height: 1.7em;
+  font-size: 13px;
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  word-break: break-word;
+}
+
+.actions { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-5); }
+button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: 14px;
+  cursor: pointer;
+  transition: transform var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out);
+}
+button:hover:not(:disabled) { transform: translateY(-2px); border-color: var(--color-text); }
+button:active:not(:disabled) { transform: translateY(0); }
+button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary { background: var(--color-accent); border-color: var(--color-accent); color: #FFFFFF; }
+
+footer {
+  margin-top: var(--space-6);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: 11px;
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 一次编排的入场序列：刻度尺 → 标题区 → 读数区 → 操作区，间隔 80ms。 */
+.reveal { opacity: 0; transform: translateY(18px); }
+.reveal.in {
+  opacity: 1;
+  transform: none;
+  transition: opacity var(--dur-base) var(--ease-out),
+              transform var(--dur-base) var(--ease-out);
+}
+.window > .reveal:nth-child(1).in { transition-delay: 0ms; }
+.window > .reveal:nth-child(2).in { transition-delay: 80ms; }
+.window > .reveal:nth-child(3).in { transition-delay: 160ms; }
+
+@media (max-width: 640px) {
+  .window { padding: var(--space-4) var(--space-3); }
+  .ruler { margin-bottom: var(--space-5); }
+  .readout { flex-wrap: wrap; }
+  .readout-bar { flex-basis: 100%; }
+  footer { flex-direction: column; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .reveal, .reveal.in { opacity: 1; transform: none; transition: none; }
+  .readout-bar span { animation: none; }
+  button { transition: none; }
+}
+</style>
+</head>
+<body data-state="starting">
+<div class="window">
+  <header class="ruler reveal">
+    <div class="ruler-meta">
+      <span class="ruler-brand">XIAOMA / 小码</span>
+      <span>启动序列 · 00 / 04</span>
+    </div>
+    <div class="ruler-line" role="presentation"></div>
+    <div class="ruler-ticks"><span>00</span><span>01</span><span>02</span><span>03</span><span>04</span></div>
+  </header>
+
+  <main class="reveal">
+    <h1 id="state-title">小码正在启动本地服务</h1>
+    <p class="lede" id="state-lede">首次启动需要构建容器并执行数据库迁移，通常需要 30–90 秒。请保持 Docker Desktop 处于运行状态。</p>
+
+    <div class="readout" aria-live="polite">
+      <span class="readout-state" id="state-label">STARTING</span>
+      <span class="readout-timer" id="state-seconds">0</span>
+      <span class="readout-unit">秒</span>
+      <div class="readout-bar" role="presentation"><span></span></div>
+    </div>
+    <p class="detail" id="state-detail">正在连接本地服务…</p>
+
+    <div class="actions">
+      <button type="button" class="primary" id="retry" disabled>重新检测服务</button>
+      <button type="button" id="choose-dir">选择项目目录…</button>
+    </div>
+  </main>
+
+  <footer class="reveal">
+    <span id="version">XIAOMA DESKTOP 1.4.1</span>
+    <span>关闭窗口不会停止本地服务；服务由 Docker 持续运行。</span>
+  </footer>
+</div>
+<script src="./status-renderer.js"></script>
+</body>
+</html>

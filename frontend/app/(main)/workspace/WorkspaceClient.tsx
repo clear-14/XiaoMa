@@ -10,14 +10,20 @@ import {
   type KeyboardEvent,
 } from "react";
 
+import CardActions from "@/components/cards/CardActions";
+import CardRenderer from "@/components/cards/CardRenderer";
 import ErrorState from "@/components/ErrorState";
 import LoadingState from "@/components/LoadingState";
 import { ApiError, getErrorMessage } from "@/lib/api";
+import { parseCardFrame } from "@/lib/card-events";
+import { cardsFromStructuredData, type Card } from "@/lib/cards";
 import {
   createConversation,
   deleteConversation,
   getConversation,
   listConversations,
+  regenerateMessage,
+  stopGeneration,
   streamMessage,
   type ConversationMessage,
   type ConversationSummary,
@@ -29,15 +35,27 @@ import {
   type DailyTask,
   type KnowledgePointDetail,
 } from "@/lib/learning";
-import type { MessageRole } from "@/lib/types";
+import { canCopyMessage, canRegenerateMessage } from "@/lib/message-actions";
+import type { MessageRole, MessageStatus } from "@/lib/types";
+import {
+  publishWorkspaceEvent,
+  subscribeWorkspaceEvent,
+} from "@/lib/workspace-bus";
 
 interface ChatMessage {
   id: string;
   role: MessageRole;
   content: string;
-  status: "completed" | "error" | "streaming";
+  status: MessageStatus;
   errorMessage?: string | null;
   modelName?: string | null;
+  /** V1.4 批次 4：附属于同一条助手消息的卡片集合，不新增消息行。 */
+  cards: Card[];
+  /**
+   * V1.4 批次 5：后端真实消息 ID。流式期间由 start/done/card 帧写入，
+   * 刷新恢复时直接取 message.id；重新生成接口只接受这个真实 ID。
+   */
+  messageId: string | null;
 }
 
 interface DraftContext {
@@ -48,13 +66,19 @@ interface DraftContext {
 }
 
 function toChatMessage(message: ConversationMessage): ChatMessage {
+  // V1.4 批次 1 起后端会持久化 streaming / stopped；刷新后必须如实还原，
+  // 不得把中断回复伪装成完整回复（PRD §3.2 / 技术设计 §3.1）。
   return {
     id: message.id,
     role: message.role,
     content: message.content,
-    status: message.status === "error" ? "error" : "completed",
+    status: message.status,
     errorMessage: message.error_message,
     modelName: message.model_name,
+    // 刷新恢复：卡片按类型从 messages.structured_data 重放，
+    // 不另存「卡片渲染结果」（契约 §2.5 / §3.3）。
+    cards: cardsFromStructuredData(message.structured_data),
+    messageId: message.id,
   };
 }
 
@@ -88,9 +112,16 @@ export default function WorkspaceClient() {
   const [sending, setSending] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [streamErrorStatus, setStreamErrorStatus] = useState<number | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const detailRequestRef = useRef(0);
   const streamControllerRef = useRef<AbortController | null>(null);
+  // 停止生成需要本轮 SSE 的真实会话 ID；新建会话时该 ID 才有值。
+  const streamConversationIdRef = useRef<string | null>(null);
+  const copyTimerRef = useRef<number | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   // 同步记录当前会话 ID：Next.js 会同步 history.replaceState 引起的查询参数变化，
   // 用于区分“URL 刚切换到自己”与“用户切换到其他会话”
@@ -98,6 +129,11 @@ export default function WorkspaceClient() {
   // 清理“刚创建但未保存任何消息”的会话时，跳过随之而来的查询参数重置，
   // 以保留当前错误提示与恢复的上下文
   const skipNextParamResetRef = useRef(false);
+  // 左栏通过窗口内事件总线驱动会话操作；用 ref 保存最新回调，避免重复订阅。
+  const actionRef = useRef<{
+    startNewChat: () => void;
+    selectConversation: (id: string) => void;
+  } | null>(null);
 
   const loadConversations = useCallback(async () => {
     setListLoading(true);
@@ -246,7 +282,25 @@ export default function WorkspaceClient() {
   useEffect(() => {
     return () => {
       streamControllerRef.current?.abort();
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
     };
+  }, []);
+
+  useEffect(() => {
+    return subscribeWorkspaceEvent((event) => {
+      if (event.type === "conversation:new") {
+        actionRef.current?.startNewChat();
+      } else if (event.type === "conversation:select") {
+        actionRef.current?.selectConversation(event.id);
+      } else if (
+        event.type === "conversation:deleted" &&
+        event.id === activeIdRef.current
+      ) {
+        actionRef.current?.startNewChat();
+      }
+    });
   }, []);
 
   useEffect(() => {
@@ -334,6 +388,11 @@ export default function WorkspaceClient() {
     }
   };
 
+  // 在 effect 中同步最新操作引用，避免在渲染阶段写 ref（React 编译器规则）
+  useEffect(() => {
+    actionRef.current = { startNewChat, selectConversation };
+  });
+
   const handleSend = async () => {
     const content = draft.trim();
     if (
@@ -349,6 +408,8 @@ export default function WorkspaceClient() {
     setSending(true);
     setStreamError(null);
     setStreamErrorStatus(null);
+    setActionError(null);
+    setStopping(false);
 
     const controller = new AbortController();
     streamControllerRef.current = controller;
@@ -390,6 +451,7 @@ export default function WorkspaceClient() {
             `/workspace?conversation_id=${encodeURIComponent(created.id)}`,
           );
           setConversations((prev) => [created, ...prev]);
+          publishWorkspaceEvent({ type: "conversation:changed" });
         } catch (err) {
           setStreamError(getErrorMessage(err));
           setStreamErrorStatus(err instanceof ApiError ? err.status : null);
@@ -404,17 +466,22 @@ export default function WorkspaceClient() {
           role: "user",
           content,
           status: "completed",
+          cards: [],
+          messageId: null,
         },
         {
           id: assistantLocalId,
           role: "assistant",
           content: "",
           status: "streaming",
+          cards: [],
+          messageId: null,
         },
       ]);
       setDraft("");
 
       const targetId = conversationId;
+      streamConversationIdRef.current = targetId;
       await streamMessage(
         targetId,
         content,
@@ -423,11 +490,16 @@ export default function WorkspaceClient() {
             if (info.title) {
               updateTitle(targetId, info.title);
             }
-            if (info.model) {
+            if (info.model || info.message_id) {
               setMessages((prev) =>
                 prev.map((message) =>
                   message.id === assistantLocalId
-                    ? { ...message, modelName: info.model }
+                    ? {
+                        ...message,
+                        modelName: info.model ?? message.modelName,
+                        // 后端预建消息的真实 ID，重新生成接口只认这个 ID。
+                        messageId: info.message_id ?? message.messageId,
+                      }
                     : message,
                 ),
               );
@@ -443,12 +515,42 @@ export default function WorkspaceClient() {
               ),
             );
           },
-          onDone: (info) => {
-            finished = true;
+          onCard: (frame) => {
+            // `card` 帧的 message_id 是后端真实 ID，本地助手消息仍使用
+            // 临时 ID；因此把卡片统一追加到「本轮正在生成的那条助手消息」，
+            // 不按 message_id 匹配，避免卡片丢失。语义不合法的帧由
+            // parseCardFrame 降级为 error_card，界面明确展示失败。
+            const parsed = parseCardFrame(frame);
+            if (!parsed) {
+              return;
+            }
             setMessages((prev) =>
               prev.map((message) =>
                 message.id === assistantLocalId
-                  ? { ...message, content: streamedText, status: "completed" }
+                  ? {
+                      ...message,
+                      cards: [...message.cards, parsed.card],
+                      messageId: message.messageId ?? parsed.messageId,
+                    }
+                  : message,
+              ),
+            );
+          },
+          onDone: (info) => {
+            finished = true;
+            // 停止生成时后端在 SSE 边界落 status=stopped 并发 done(stopped)，
+            // 界面必须如实显示，不能伪装成完整回复。
+            const finalStatus: MessageStatus =
+              info.result_status === "stopped" ? "stopped" : "completed";
+            setMessages((prev) =>
+              prev.map((message) =>
+                message.id === assistantLocalId
+                  ? {
+                      ...message,
+                      content: streamedText,
+                      status: finalStatus,
+                      messageId: info.message_id ?? message.messageId,
+                    }
                   : message,
               ),
             );
@@ -459,6 +561,9 @@ export default function WorkspaceClient() {
               updateMessageCount(targetId, info.message_count);
             }
             void refreshConversationList();
+            // 一轮对话结束后，左栏会话列表与右侧真实业务面板同步刷新
+            publishWorkspaceEvent({ type: "conversation:changed" });
+            publishWorkspaceEvent({ type: "panels:refresh" });
           },
           onError: (info) => {
             errorEventMessage = info.message;
@@ -552,11 +657,88 @@ export default function WorkspaceClient() {
       }
     } finally {
       streamControllerRef.current = null;
-      if (!controller.signal.aborted) {
-        setSending(false);
-      }
+      streamConversationIdRef.current = null;
+      setStopping(false);
+      // 无论连接是被卸载中止还是正常结束，都必须复位生成态，
+      // 否则输入框、新建/切换/删除会话会被永久禁用。
+      setSending(false);
     }
   };
+
+  /**
+   * 停止生成：只调用后端 REST 置位，**不主动 abort SSE 连接**。
+   * 后端在下一个事件边界检测到标志后落 `status=stopped` 并发 `done(stopped)`；
+   * 若客户端先断开，StreamingResponse 会走 GeneratorExit 分支落 `error`，
+   * 与「用户主动停止」的语义不符。
+   */
+  const handleStop = useCallback(async () => {
+    const conversationId = streamConversationIdRef.current;
+    if (!conversationId || !sending || stopping) {
+      return;
+    }
+    setStopping(true);
+    setActionError(null);
+    try {
+      const result = await stopGeneration(conversationId);
+      if (!result.stopped) {
+        // 后端已无进行中的生成（幂等结果）：直接按持久化状态复位界面。
+        setSending(false);
+        setStopping(false);
+        void loadConversation(conversationId);
+      }
+    } catch (err) {
+      setActionError(getErrorMessage(err));
+      setStopping(false);
+    }
+  }, [sending, stopping, loadConversation]);
+
+  /** 重新生成：后端新增一条助手消息，重新拉取详情保证与持久化结果一致。 */
+  const handleRegenerate = useCallback(
+    async (message: ChatMessage) => {
+      const conversationId = activeIdRef.current;
+      if (
+        !conversationId ||
+        !message.messageId ||
+        sending ||
+        regeneratingId !== null
+      ) {
+        return;
+      }
+      setRegeneratingId(message.id);
+      setActionError(null);
+      try {
+        await regenerateMessage(conversationId, message.messageId);
+        await loadConversation(conversationId);
+        publishWorkspaceEvent({ type: "conversation:changed" });
+        publishWorkspaceEvent({ type: "panels:refresh" });
+      } catch (err) {
+        setActionError(getErrorMessage(err));
+      } finally {
+        setRegeneratingId(null);
+      }
+    },
+    [sending, regeneratingId, loadConversation],
+  );
+
+  const handleCopy = useCallback(async (message: ChatMessage) => {
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("当前环境不支持剪贴板，请手动选择文本复制");
+      }
+      await navigator.clipboard.writeText(message.content);
+      setCopiedId(message.id);
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = window.setTimeout(() => {
+        setCopiedId(null);
+        copyTimerRef.current = null;
+      }, 2000);
+      setActionError(null);
+    } catch (err) {
+      setActionError(getErrorMessage(err));
+    }
+  }, []);
 
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (
@@ -678,7 +860,21 @@ export default function WorkspaceClient() {
             <h2 className="chat-title">{activeTitle}</h2>
             <p className="chat-subtitle">{headerSubtitle}</p>
           </div>
-          {sending && <span className="status-pill">AI 正在回复…</span>}
+          {sending ? (
+            <div className="chat-head-actions">
+              <span className="status-pill">
+                {stopping ? "正在停止…" : "AI 正在回复…"}
+              </span>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => void handleStop()}
+                disabled={stopping}
+              >
+                {stopping ? "正在停止…" : "停止生成"}
+              </button>
+            </div>
+          ) : null}
         </header>
 
         {contextLoading && <LoadingState label="正在读取学习上下文…" />}
@@ -753,13 +949,17 @@ export default function WorkspaceClient() {
                     key={message.id}
                     className={`message message-${message.role}${
                       message.status === "error" ? " message-failed" : ""
-                    }`}
+                    }${message.status === "stopped" ? " message-stopped" : ""}`}
                   >
                     <div className="message-role">
                       {message.role === "user" ? "你" : "小码"}
                       {message.role === "assistant" && message.modelName && (
                         <span className="message-model">{message.modelName}</span>
                       )}
+                      {message.role === "assistant" &&
+                        message.status === "stopped" && (
+                          <span className="message-model">已停止生成</span>
+                        )}
                     </div>
                     <div className="message-bubble">
                       {message.status === "error" && (
@@ -769,6 +969,8 @@ export default function WorkspaceClient() {
                         <div className="message-text">{message.content}</div>
                       ) : message.status === "streaming" ? (
                         <div className="message-text muted">正在生成…</div>
+                      ) : message.status === "stopped" ? (
+                        <div className="message-text muted">（已停止生成）</div>
                       ) : message.status === "error" ? (
                         <div className="message-text muted">
                           （未生成任何内容）
@@ -784,6 +986,36 @@ export default function WorkspaceClient() {
                           {message.errorMessage}
                         </div>
                       )}
+                      {/* 卡片附属于同一条消息；文本与卡片可同时存在。 */}
+                      <CardRenderer
+                        cards={message.cards}
+                        renderActions={(card) => <CardActions card={card} />}
+                      />
+                      {message.status !== "streaming" ? (
+                        <div className="message-actions">
+                          {canCopyMessage(message) ? (
+                            <button
+                              type="button"
+                              className="message-action-btn"
+                              onClick={() => void handleCopy(message)}
+                            >
+                              {copiedId === message.id ? "已复制" : "复制"}
+                            </button>
+                          ) : null}
+                          {canRegenerateMessage(message) ? (
+                            <button
+                              type="button"
+                              className="message-action-btn"
+                              disabled={sending || regeneratingId !== null}
+                              onClick={() => void handleRegenerate(message)}
+                            >
+                              {regeneratingId === message.id
+                                ? "重新生成中…"
+                                : "重新生成"}
+                            </button>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </div>
                   </article>
                 ))
@@ -811,6 +1043,11 @@ export default function WorkspaceClient() {
                       </button>
                     )}
                   </div>
+                </div>
+              )}
+              {actionError && (
+                <div className="stream-error" role="alert">
+                  <div className="stream-error-text">{actionError}</div>
                 </div>
               )}
               <textarea

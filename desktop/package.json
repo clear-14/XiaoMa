@@ -1,0 +1,67 @@
+{
+  "name": "xiaoma-desktop",
+  "version": "1.4.1",
+  "private": true,
+  "description": "小码 Xiaoma V1.4 桌面窗口壳：加载本地 Next.js 界面并管理 Docker Compose 服务",
+  "author": "Xiaoma",
+  "main": "src/main.js",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "test": "node --test tests/service-controller.test.js tests/preload-guard.test.js tests/no-shell-api.test.js",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/preload-guard.js && node --check src/service-controller.js && node --check src/menu.js && node --check src/status-renderer.js && node --check scripts/stage-project.js",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "45.2.3",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "cn.xiaoma.desktop",
+    "productName": "Xiaoma",
+    "files": [
+      "src/**/*",
+      "scripts/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build-staging/project",
+        "to": "project"
+      }
+    ],
+    "beforePack": "./scripts/stage-project.js",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "Xiaoma-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Education"
+    }
+  }
+}

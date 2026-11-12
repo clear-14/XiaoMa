@@ -87,6 +87,25 @@ export default function QuizClient() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void loadOverview();
+      // 阶段 5：从「能力诊断」页生成诊断测验后带 ?attempt=<id> 跳转，
+      // 自动打开该测验，避免用户再回到历史列表里翻找。
+      const attemptId = new URLSearchParams(window.location.search).get(
+        "attempt",
+      );
+      if (attemptId) {
+        void getQuizAttempt(attemptId)
+          .then((data) => {
+            setAttempt(data);
+            setAnswers({});
+            window.setTimeout(() => {
+              quizRef.current?.scrollIntoView({
+                behavior: "smooth",
+                block: "start",
+              });
+            }, 0);
+          })
+          .catch((err) => setCreateError(getErrorMessage(err)));
+      }
     }, 0);
     return () => window.clearTimeout(timer);
   }, [loadOverview]);
@@ -548,6 +567,7 @@ export default function QuizClient() {
                     <span className="history-title">{item.scope_name}</span>
                     <span className="history-meta">
                       {scopeTypeLabel(item.scope_type)} · {item.question_count} 题
+                      {item.purpose === "placement" ? " · 诊断测验（跳级验证）" : ""}
                       {item.ai_accepted > 0
                         ? ` · ${item.ai_accepted} 道 AI 变式题`
                         : ""}

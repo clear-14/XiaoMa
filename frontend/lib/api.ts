@@ -1,8 +1,30 @@
 /** 统一 API 请求封装：所有前端请求必须经由本模块访问后端。 */
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
+import {
+  authHeaders,
+  clearAccessToken,
+  getAccessToken,
+  notifyUnauthorized,
+} from "@/lib/access-token";
+
+// 默认使用同源 /api/v1，由 Next.js 服务端路由代理到后端：
+// 这样浏览器只需访问前端端口，局域网部署时不会错误请求访问者自己的
+// localhost:8000，也让访问密码令牌统一在同源请求中传递。
+const API_BASE = (
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/v1"
+).replace(/\/$/, "");
 const DEFAULT_TIMEOUT_MS = 10_000;
+
+function handleUnauthorized(status: number): void {
+  if (status !== 401) {
+    return;
+  }
+  const hadToken = Boolean(getAccessToken());
+  clearAccessToken();
+  if (hadToken) {
+    notifyUnauthorized();
+  }
+}
 
 /** 后端请求异常：status 为 0 表示网络/超时/流中断类错误。 */
 export class ApiError extends Error {
@@ -62,7 +84,11 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     res = await fetch(`${API_BASE}${path}`, {
       ...rest,
       signal: options.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
-      headers: { "Content-Type": "application/json", ...(optHeaders ?? {}) },
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders(),
+        ...(optHeaders ?? {}),
+      },
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === "TimeoutError") {
@@ -75,6 +101,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
 
   if (!res.ok) {
+    handleUnauthorized(res.status);
     throw new ApiError(res.status, await extractErrorMessage(res));
   }
   if (res.status === 204) {
@@ -97,7 +124,30 @@ export const api = {
     }),
   put: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "PUT", body: JSON.stringify(body) }),
+  /** V1.4 批次 3：会话重命名等局部更新（后端 PATCH 已由同源代理导出）。 */
+  patch: <T>(path: string, body: unknown) =>
+    request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
   delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
+  /** 下载二进制响应（如数据库备份），失败时抛出 ApiError。 */
+  download: async (path: string): Promise<Blob> => {
+    let res: Response;
+    try {
+      res = await fetch(`${API_BASE}${path}`, {
+        headers: authHeaders(),
+        signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+      });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "TimeoutError") {
+        throw new ApiError(0, "请求超时，请稍后重试");
+      }
+      throw new ApiError(0, "无法连接到服务器，请确认后端服务已启动");
+    }
+    if (!res.ok) {
+      handleUnauthorized(res.status);
+      throw new ApiError(res.status, await extractErrorMessage(res));
+    }
+    return await res.blob();
+  },
 };
 
 export interface SseEvent {
@@ -126,6 +176,7 @@ export async function streamApi(
       headers: {
         "Content-Type": "application/json",
         Accept: "text/event-stream",
+        ...authHeaders(),
       },
       signal,
     });
@@ -137,6 +188,7 @@ export async function streamApi(
   }
 
   if (!res.ok) {
+    handleUnauthorized(res.status);
     throw new ApiError(res.status, await extractErrorMessage(res));
   }
 

@@ -70,6 +70,16 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    href: "/mastery",
+    label: "能力诊断",
+    icon: (
+      <Icon>
+        <path d="M3 20h18" />
+        <path d="M6 20V11M11 20V5M16 20v-7M21 20v-4" />
+      </Icon>
+    ),
+  },
+  {
     href: "/quiz",
     label: "测验中心",
     icon: (
