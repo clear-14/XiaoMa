@@ -30,3 +30,19 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# 本地工作目录（AI 助手的工作记忆，只属于本机，不随开源仓库发布）
+.workbuddy/
+
+# 运行时密钥与测试临时目录（不得进入版本库）
+.secret_key
+backend/.pytest-tmp-*/
+
+# 打包产物（超过 GitHub 单文件 100MB 限制，改走 Release 发布）
+*.exe
+*.msi
+*.dmg
+*.AppImage
+*.zip
+*.7z
+*.bak

@@ -1,5 +1,16 @@
-# 小码 Xiaoma 部署编排（阶段 1 初始版本）
-# 用法：cp .env.example .env && docker compose up -d
+# 小码 Xiaoma 部署编排
+#
+# 默认配置仅本机可访问：前端端口绑定 127.0.0.1，后端只在 Compose 内部网络
+# 暴露，不映射到宿主机。浏览器通过前端 Next.js 的同源 /api/v1 代理访问后端。
+#
+# 用法：
+#   cp .env.example .env
+#   docker compose up -d --build
+#
+# 开放局域网访问（必须先设置访问密码，详见 docs/Docker部署指南.md）：
+#   .env 中设置 BIND_ADDRESS=0.0.0.0
+#              XIAOMA_ALLOW_REMOTE=true
+#              XIAOMA_ACCESS_PASSWORD=<强密码>
 services:
   backend:
     build: ./backend
@@ -7,25 +18,56 @@ services:
     env_file:
       - path: .env
         required: false
-    ports:
-      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      # 仅用于启动时安全校验，不改变容器内监听地址。
+      # 后端容器监听 0.0.0.0，仅供 frontend 容器通过内部网络访问。
+      XIAOMA_BIND_ADDRESS: ${BIND_ADDRESS:-127.0.0.1}
+      XIAOMA_ALLOW_REMOTE: ${XIAOMA_ALLOW_REMOTE:-false}
     volumes:
-      # SQLite 数据文件持久化：容器重启后学习数据不丢失
+      # SQLite 数据库、自动备份与加密密钥持久化：容器重启/升级不丢失数据
       - xiaoma-data:/app/data
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
     restart: unless-stopped
 
   frontend:
     build: ./frontend
     container_name: xiaoma-frontend
-    env_file:
-      - path: .env
-        required: false
+    # 前端不需要访问密码、加密密钥等后端秘密，故不加载 .env
     environment:
       - PORT=3000
+      - HOSTNAME=0.0.0.0
+      # Next.js 服务端代理转发目标（容器网络内部地址）
+      - BACKEND_INTERNAL_URL=http://backend:8000
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      # 默认只绑定本机回环地址；开放局域网/公网前必须设置访问密码
+      - "${BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-3000}:3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    healthcheck:
+      # 经前端同源代理检查后端健康状态，同时验证代理链路可用
+      test:
+        - CMD
+        - wget
+        - -q
+        - -O
+        - /dev/null
+        - http://127.0.0.1:3000/api/v1/health
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
 
 volumes:

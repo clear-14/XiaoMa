@@ -1,0 +1,12 @@
+# 容器内执行的脚本必须使用 LF，避免 Windows 检出后无法运行
+*.sh text eol=lf
+
+# 常规文本文件统一使用 LF
+*.py text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
