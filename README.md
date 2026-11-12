@@ -203,7 +203,21 @@ XIAOMA_ACCESS_PASSWORD=你的强密码
 
 ### 桌面版（Windows 安装包）
 
-`desktop/dist/Xiaoma-Setup-1.4.1.exe`（117 MB）是自带 Compose 工程的桌面窗口壳：双击安装后启动，窗口会自动拉起本地服务并进入工作台。若本机已有同一套服务在运行（例如开发栈），窗口会先探活并直接复用，约 2 秒进入工作台；否则在包内工程上执行 `docker compose up -d --build`，本机实测首次启动 **87 秒**（含镜像构建）。
+安装包 `Xiaoma-Setup-1.4.1.exe`（约 117 MB）是自带 Compose 工程的桌面窗口壳。**仓库里不包含这个文件**（`desktop/dist/` 属于构建产物，已被忽略）：请从 [Releases](https://github.com/clear-14/XiaoMa/releases) 下载，或由发布者直接提供；若 Releases 尚无资产，按下方「自行打包」从源码生成。
+
+双击安装完成后启动，窗口会自动拉起本地服务并进入工作台。若本机已有同一套服务在运行（例如开发栈），窗口会先探活并直接复用，约 2 秒进入工作台；否则在包内工程上执行 `docker compose up -d --build`，本机实测首次启动 **87 秒**（含镜像构建）。
+
+前置条件：Windows 10/11 64 位，且已安装并运行 Docker Desktop —— 窗口只是加载器，前后端服务都在容器里。零基础分步教程见 [零基础桌面应用部署教程](docs/零基础桌面应用部署教程.md)。
+
+自行打包（需要 Node.js 22+ 与 Docker Desktop）：
+
+```bash
+git clone https://github.com/clear-14/XiaoMa.git
+cd XiaoMa/desktop
+npm install
+npm run check && npm test
+npm run dist:win      # 产物：desktop/dist/Xiaoma-Setup-1.4.1.exe
+```
 
 
 - 安装位置：默认 `%LOCALAPPDATA%\Programs\Xiaoma`（安装器会记住上次选择的路径）。
